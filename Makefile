@@ -1,5 +1,6 @@
-PYTHON ?= uv run --with typer python3
-PYRIGHT_FILES := m3.py template.py typings
+PYTHON ?= python3
+PYRIGHT ?= uv run --with basedpyright basedpyright
+PYRIGHT_FILES := m3.py
 
 .PHONY: all lint fix test
 
@@ -7,7 +8,7 @@ all: fix lint test
 
 lint:
 	ruff check .
-	basedpyright --project pyproject.toml --level error $(PYRIGHT_FILES)
+	$(PYRIGHT) --project pyproject.toml --level error $(PYRIGHT_FILES)
 
 fix:
 	ruff check --extend-select I --fix-only --fix .

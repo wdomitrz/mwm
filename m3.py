@@ -6,7 +6,6 @@
 #
 # /// script
 # dependencies = [
-#   "typer",
 #   "pyobjc-framework-ApplicationServices",
 #   "pyobjc-framework-Cocoa",
 #   "pyobjc-framework-Quartz",
@@ -15,6 +14,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -28,9 +28,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, assert_never, cast
-
-import typer
+from typing import Any, ClassVar, Literal, assert_never, cast
 
 Direction = Literal["left", "right", "up", "down"]
 CommandKind = Literal[
@@ -170,14 +168,17 @@ class Rect:
             x += width + gap
         return tuple(rects)
 
-    def split_rows(self, *, count: int, gap: int) -> tuple[Rect, ...]:
+    def split_rows(
+        self, *, count: int, gap: int, weights: tuple[float, ...] | None = None
+    ) -> tuple[Rect, ...]:
         if count <= 0:
             return ()
         if count == 1:
             return (self,)
 
         available_height = max(0, self.height - gap * (count - 1))
-        heights = self._partition(available_height, tuple(1.0 for _ in range(count)))
+        row_weights = usable_weights(weights=weights, count=count)
+        heights = self._partition(available_height, row_weights)
         y = self.y
         rects: list[Rect] = []
         for height in heights:
@@ -653,11 +654,17 @@ class MacApi:
 class LayoutState:
     columns_by_screen: dict[str, list[list[str]]] = field(default_factory=dict)
     fullscreen_keys: set[str] = field(default_factory=set)
+    row_weights_by_key: dict[str, float] = field(default_factory=dict)
 
     def keep_only(
         self, *, visible_keys: set[str], visible_screen_keys: set[str]
     ) -> None:
         self.fullscreen_keys.intersection_update(visible_keys)
+        self.row_weights_by_key = {
+            key: weight
+            for key, weight in self.row_weights_by_key.items()
+            if key in visible_keys
+        }
         for screen_key in tuple(self.columns_by_screen):
             if screen_key not in visible_screen_keys:
                 del self.columns_by_screen[screen_key]
@@ -711,12 +718,6 @@ class LayoutState:
         while len(columns) > target:
             extra = columns.pop()
             columns[-1].extend(extra)
-        while len(columns) < target:
-            source = max(range(len(columns)), key=lambda index: len(columns[index]))
-            if len(columns[source]) <= 1:
-                break
-            key = columns[source].pop()
-            columns.insert(source + 1, [key])
         return columns
 
     def find(self, *, key: str) -> tuple[str, int, int] | None:
@@ -726,7 +727,7 @@ class LayoutState:
                     return (screen_key, column_index, column.index(key))
         return None
 
-    def move(self, *, key: str, direction: Direction) -> bool:
+    def move(self, *, key: str, direction: Direction, config: LayoutConfig) -> bool:
         found = self.find(key=key)
         if found is None:
             return False
@@ -751,7 +752,13 @@ class LayoutState:
                 )
             case "left":
                 if column_index == 0:
-                    return False
+                    if not can_create_column_from(
+                        columns=columns, source_index=column_index, config=config
+                    ):
+                        return False
+                    columns.insert(0, [])
+                    column_index += 1
+                self.row_weights_by_key.pop(key, None)
                 move_between_columns(
                     columns=columns,
                     key=key,
@@ -760,7 +767,12 @@ class LayoutState:
                 )
             case "right":
                 if column_index >= len(columns) - 1:
-                    return False
+                    if not can_create_column_from(
+                        columns=columns, source_index=column_index, config=config
+                    ):
+                        return False
+                    columns.insert(column_index + 1, [])
+                self.row_weights_by_key.pop(key, None)
                 move_between_columns(
                     columns=columns,
                     key=key,
@@ -771,6 +783,16 @@ class LayoutState:
                 assert_never(unreachable)
         self.columns_by_screen[screen_key] = [column for column in columns if column]
         return True
+
+    def capture_row_weights(self, *, windows_by_key: dict[str, WindowInfo]) -> None:
+        for columns in self.columns_by_screen.values():
+            for column in columns:
+                if len(column) <= 1:
+                    continue
+                for key in column:
+                    window = windows_by_key.get(key)
+                    if window is not None and window.frame.height > 0:
+                        self.row_weights_by_key[key] = float(window.frame.height)
 
 
 class Ipc:
@@ -828,6 +850,7 @@ class WindowDaemon:
         self.tick_timer: Any | None = None
         self.next_periodic_at = 0.0
         self.retile_at: float | None = None
+        self.capture_row_weights_at_retile = False
         self.ignore_events_until = 0.0
         self.run_loop: Any | None = None
 
@@ -1082,12 +1105,23 @@ class WindowDaemon:
             self.api.hiservices.kAXWindowDeminiaturizedNotification,
         ):
             self.refresh_observers()
-        self.schedule_retile()
+        self.schedule_retile(
+            capture_row_weights=notification
+            in (
+                self.api.hiservices.kAXMovedNotification,
+                self.api.hiservices.kAXResizedNotification,
+                self.api.hiservices.kAXWindowMovedNotification,
+                self.api.hiservices.kAXWindowResizedNotification,
+            )
+        )
 
-    def schedule_retile(self) -> None:
+    def schedule_retile(self, *, capture_row_weights: bool = False) -> None:
         now = time.monotonic()
         if now < self.ignore_events_until:
             return
+        self.capture_row_weights_at_retile = (
+            self.capture_row_weights_at_retile or capture_row_weights
+        )
         target = now + self.EVENT_QUIET_SECONDS
         self.retile_at = (
             target if self.retile_at is None else min(self.retile_at, target)
@@ -1105,6 +1139,9 @@ class WindowDaemon:
                 visible_keys=set(windows_by_key),
                 visible_screen_keys=set(screens),
             )
+            if self.capture_row_weights_at_retile:
+                self.state.capture_row_weights(windows_by_key=windows_by_key)
+                self.capture_row_weights_at_retile = False
             for screen_key, screen_windows in grouped_windows.items():
                 screen = screens.get(screen_key)
                 if screen is None:
@@ -1136,7 +1173,10 @@ class WindowDaemon:
         windows_by_key: dict[str, WindowInfo],
     ) -> None:
         for key, frame in layout_targets(
-            screen=screen, columns=columns, config=self.config
+            screen=screen,
+            columns=columns,
+            config=self.config,
+            row_weights_by_key=self.state.row_weights_by_key,
         ).items():
             window = windows_by_key.get(key)
             if window is not None:
@@ -1160,7 +1200,9 @@ class WindowDaemon:
         focused = self.api.focused_window()
         if focused is None:
             return "no focused window"
-        changed = self.state.move(key=focused.key, direction=direction)
+        changed = self.state.move(
+            key=focused.key, direction=direction, config=self.config
+        )
         if not changed:
             return "no move target"
         self.retile()
@@ -1243,11 +1285,31 @@ def window_sort_key(window: WindowInfo) -> tuple[str, int, int, str]:
     return (window.screen_key, window.pid, window.order, window.key)
 
 
+def usable_weights(*, weights: tuple[float, ...] | None, count: int) -> tuple[float, ...]:
+    """Return positive finite row weights or an equal split fallback.
+
+    >>> usable_weights(weights=(3, 1), count=2)
+    (3, 1)
+    >>> usable_weights(weights=(0, 1), count=2)
+    (1.0, 1.0)
+    >>> usable_weights(weights=None, count=3)
+    (1.0, 1.0, 1.0)
+    """
+    if (
+        weights is None
+        or len(weights) != count
+        or any(weight <= 0 or not math.isfinite(weight) for weight in weights)
+    ):
+        return tuple(1.0 for _ in range(count))
+    return weights
+
+
 def layout_targets(
     *,
     screen: ScreenInfo,
     columns: list[list[str]],
     config: LayoutConfig,
+    row_weights_by_key: dict[str, float] | None = None,
 ) -> dict[str, Rect]:
     """Map window keys to target frames for the simple column layout.
 
@@ -1259,6 +1321,22 @@ def layout_targets(
     ... )
     >>> [(key, rect.width, rect.height) for key, rect in targets.items()]
     [('a', 400, 500), ('b', 400, 500), ('c', 200, 250), ('d', 200, 250)]
+    >>> weighted = layout_targets(
+    ...     screen=screen,
+    ...     columns=[["a", "b"]],
+    ...     config=LayoutConfig(columns=1),
+    ...     row_weights_by_key={"a": 3, "b": 1},
+    ... )
+    >>> [(key, rect.height) for key, rect in weighted.items()]
+    [('a', 375), ('b', 125)]
+    >>> mixed = layout_targets(
+    ...     screen=screen,
+    ...     columns=[["a", "b", "c"]],
+    ...     config=LayoutConfig(columns=1),
+    ...     row_weights_by_key={"a": 300, "c": 100},
+    ... )
+    >>> [(key, rect.height) for key, rect in mixed.items()]
+    [('a', 250), ('b', 167), ('c', 83)]
     """
     column_frames = screen.frame.split_columns(
         count=len(columns), columns=config.columns, gap=config.gap
@@ -1268,10 +1346,37 @@ def layout_targets(
         for column, column_frame in zip(columns, column_frames, strict=True)
         for key, frame in zip(
             column,
-            column_frame.split_rows(count=len(column), gap=config.gap),
+            column_frame.split_rows(
+                count=len(column),
+                gap=config.gap,
+                weights=column_row_weights(
+                    column=column, row_weights_by_key=row_weights_by_key or {}
+                ),
+            ),
             strict=True,
         )
     }
+
+
+def column_row_weights(
+    *, column: list[str], row_weights_by_key: dict[str, float]
+) -> tuple[float, ...]:
+    """Return row weights, giving new rows a neutral local weight.
+
+    >>> column_row_weights(column=["a", "b"], row_weights_by_key={})
+    (1.0, 1.0)
+    >>> column_row_weights(column=["a", "b", "c"], row_weights_by_key={"a": 300, "c": 100})
+    (300, 200.0, 100)
+    """
+    known = [
+        row_weights_by_key[key]
+        for key in column
+        if key in row_weights_by_key
+        and row_weights_by_key[key] > 0
+        and math.isfinite(row_weights_by_key[key])
+    ]
+    fallback = sum(known) / len(known) if known else 1.0
+    return tuple(row_weights_by_key.get(key, fallback) for key in column)
 
 
 def screen_for_frame(frame: Rect, screens: tuple[ScreenInfo, ...]) -> ScreenInfo | None:
@@ -1293,28 +1398,40 @@ def swap_row(*, column: list[str], row_index: int, target_row: int) -> None:
     column[row_index], column[target_row] = column[target_row], column[row_index]
 
 
+def can_create_column_from(
+    *, columns: list[list[str]], source_index: int, config: LayoutConfig
+) -> bool:
+    """Return whether an edge move may split one item into a new column.
+
+    >>> can_create_column_from(columns=[["a", "b"]], source_index=0, config=LayoutConfig(columns=2))
+    True
+    >>> can_create_column_from(columns=[["a"]], source_index=0, config=LayoutConfig(columns=2))
+    False
+    >>> can_create_column_from(columns=[["a"], ["b"]], source_index=0, config=LayoutConfig(columns=2))
+    False
+    """
+    return len(columns) < config.max_column_count and len(columns[source_index]) > 1
+
+
 def move_between_columns(
     *, columns: list[list[str]], key: str, source_index: int, target_index: int
 ) -> None:
-    """Move horizontally without collapsing one-window columns into no-ops.
+    """Move horizontally by inserting into the adjacent column.
 
     >>> columns = [["a"], ["b"], ["c"]]
     >>> move_between_columns(columns=columns, key="b", source_index=1, target_index=0)
     >>> columns
-    [['b'], ['a'], ['c']]
-    >>> columns = [["a", "b"], ["c"]]
+    [['b', 'a'], [], ['c']]
+    >>> columns = [["a", "b"], ["c", "d"]]
     >>> move_between_columns(columns=columns, key="b", source_index=0, target_index=1)
     >>> columns
-    [['a'], ['c', 'b']]
+    [['a'], ['c', 'b', 'd']]
     """
     source = columns[source_index]
     target = columns[target_index]
     old_row = source.index(key)
-    if old_row < len(target):
-        source[old_row], target[old_row] = target[old_row], source[old_row]
-        return
     _ = source.pop(old_row)
-    target.append(key)
+    target.insert(min(old_row, len(target)), key)
 
 
 def select_focus_target(
@@ -1581,22 +1698,32 @@ True
 [['a'], ['b'], ['c', 'd']]
 >>> state.find(key="c")
 ('s', 2, 0)
->>> state.move(key="b", direction="left")
+>>> state.move(key="b", direction="left", config=LayoutConfig(columns=2.5))
 True
 >>> state.columns_by_screen["s"]
-[['b'], ['a'], ['c', 'd']]
->>> state.move(key="d", direction="up")
+[['b', 'a'], ['c', 'd']]
+>>> state.move(key="d", direction="up", config=LayoutConfig(columns=2.5))
 True
 >>> state.columns_by_screen["s"]
-[['b'], ['a'], ['d', 'c']]
+[['b', 'a'], ['d', 'c']]
 >>> state.reconcile(screen=screen, windows=windows, config=LayoutConfig(columns=2.5))
-[['b'], ['a'], ['d', 'c']]
+[['b', 'a'], ['d', 'c']]
 >>> state.keep_only(visible_keys={"b", "d"}, visible_screen_keys={"s"})
 >>> state.columns_by_screen
 {'s': [['b'], ['d']]}
 >>> state.keep_only(visible_keys={"b", "d"}, visible_screen_keys=set())
 >>> state.columns_by_screen
 {}
+>>> state.columns_by_screen["s"] = [["a", "b", "c"]]
+>>> state.move(key="b", direction="right", config=LayoutConfig(columns=2))
+True
+>>> state.columns_by_screen["s"]
+[['a', 'c'], ['b']]
+>>> state.row_weights_by_key = {"a": 300, "b": 50, "c": 100}
+>>> state.move(key="c", direction="right", config=LayoutConfig(columns=2))
+True
+>>> state.row_weights_by_key
+{'a': 300, 'b': 50}
 """,
     "layout_targets_and_screens": """
 >>> screen = _Test.screen(width=1000, height=500)
@@ -1666,7 +1793,7 @@ ValueError: unknown direction: north
 >>> daemon.handle(IpcRequest(kind="move", direction="left"))
 'moved left'
 >>> daemon.state.columns_by_screen["s"]
-[['b'], ['a'], ['c', 'd']]
+[['b', 'a'], ['c', 'd']]
 >>> daemon.handle(IpcRequest(kind="fullscreen"))
 'fullscreen on'
 >>> api.frames["b"].as_key()
@@ -1677,6 +1804,12 @@ ValueError: unknown direction: north
 'columns set to 1'
 >>> daemon.state.columns_by_screen["s"]
 [['b', 'a', 'c', 'd']]
+>>> daemon.handle(IpcRequest(kind="columns", columns=2))
+'columns set to 2'
+>>> daemon.handle(IpcRequest(kind="move", direction="right"))
+'moved right'
+>>> daemon.state.columns_by_screen["s"]
+[['a', 'c', 'd'], ['b']]
 """,
 }
 
@@ -1712,86 +1845,79 @@ class ClientArgs:
         return 0 if response.ok else 1
 
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="m3.py",
+        description="Small macOS tiling daemon controlled through a Unix socket.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
+    daemon_parser = subparsers.add_parser("daemon")
+    daemon_parser.add_argument("--columns", "-c", type=float, default=2.0)
+    daemon_parser.add_argument("--gap", "-g", type=int, default=0)
+    daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
+    daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
 
-@app.command()
-def daemon(
-    columns: Annotated[float, typer.Option("--columns", "-c")] = 2.0,
-    gap: Annotated[int, typer.Option("--gap", "-g")] = 0,
-    poll_seconds: Annotated[float, typer.Option("--poll-seconds")] = 1.0,
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    raise typer.Exit(
-        DaemonArgs(
-            columns=columns, gap=gap, poll_seconds=poll_seconds, socket_path=socket_path
-        ).main()
+    for command in ("focus", "move"):
+        command_parser = subparsers.add_parser(command)
+        command_parser.add_argument(
+            "direction", choices=("left", "right", "up", "down")
+        )
+        command_parser.add_argument(
+            "--socket", type=Path, default=None, dest="socket_path"
+        )
+
+    fullscreen_parser = subparsers.add_parser("fullscreen")
+    fullscreen_parser.add_argument(
+        "--socket", type=Path, default=None, dest="socket_path"
     )
 
+    columns_parser = subparsers.add_parser("columns")
+    columns_parser.add_argument("number_of_columns", type=float)
+    columns_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
 
-@app.command()
-def focus(
-    direction: Annotated[str, typer.Argument()],
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    request = IpcRequest(kind="focus", direction=parse_direction(direction))
-    raise typer.Exit(ClientArgs(request=request, socket_path=socket_path).main())
+    for command in ("retile", "status", "stop"):
+        command_parser = subparsers.add_parser(command)
+        command_parser.add_argument(
+            "--socket", type=Path, default=None, dest="socket_path"
+        )
 
-
-@app.command()
-def move(
-    direction: Annotated[str, typer.Argument()],
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    request = IpcRequest(kind="move", direction=parse_direction(direction))
-    raise typer.Exit(ClientArgs(request=request, socket_path=socket_path).main())
+    return parser
 
 
-@app.command()
-def fullscreen(
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    request = IpcRequest(kind="fullscreen")
-    raise typer.Exit(ClientArgs(request=request, socket_path=socket_path).main())
+def run_args(args: argparse.Namespace) -> int:
+    match args.command:
+        case "daemon":
+            return DaemonArgs(
+                columns=args.columns,
+                gap=args.gap,
+                poll_seconds=args.poll_seconds,
+                socket_path=args.socket_path,
+            ).main()
+        case "focus" | "move":
+            request = IpcRequest(
+                kind=cast(CommandKind, args.command),
+                direction=parse_direction(args.direction),
+            )
+            return ClientArgs(request=request, socket_path=args.socket_path).main()
+        case "fullscreen" | "retile" | "status" | "stop":
+            request = IpcRequest(kind=cast(CommandKind, args.command))
+            return ClientArgs(request=request, socket_path=args.socket_path).main()
+        case "columns":
+            request = IpcRequest(kind="columns", columns=args.number_of_columns)
+            return ClientArgs(request=request, socket_path=args.socket_path).main()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
-@app.command("columns")
-def set_columns(
-    number_of_columns: Annotated[float, typer.Argument()],
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    request = IpcRequest(kind="columns", columns=number_of_columns)
-    raise typer.Exit(ClientArgs(request=request, socket_path=socket_path).main())
-
-
-@app.command()
-def retile(
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    raise typer.Exit(
-        ClientArgs(request=IpcRequest(kind="retile"), socket_path=socket_path).main()
-    )
-
-
-@app.command()
-def status(
-    socket_path: Annotated[Path | None, typer.Option("--socket")] = None,
-) -> None:
-    raise typer.Exit(
-        ClientArgs(request=IpcRequest(kind="status"), socket_path=socket_path).main()
-    )
-
-
-@app.command()
-def stop(socket_path: Annotated[Path | None, typer.Option("--socket")] = None) -> None:
-    raise typer.Exit(
-        ClientArgs(request=IpcRequest(kind="stop"), socket_path=socket_path).main()
-    )
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    return run_args(parser.parse_args(argv))
 
 
 if __name__ == "__main__":
     try:
-        app()
+        raise SystemExit(main())
     except RuntimeError as error:
         print(error, file=sys.stderr)
-        raise typer.Exit(1) from error
+        raise SystemExit(1) from error

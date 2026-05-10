@@ -30,11 +30,9 @@ extend-select = ["I"]
 
 [tool.ruff.lint.per-file-ignores]
 "m3.py" = ["ANN401", "BLE001", "PLC0415"]
-"typings/typer.pyi" = ["ANN401", "N802"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
-exclude = ["pyobjc"]
-stubPath = "typings"
+exclude = [".venv", "pyobjc"]
 reportUnnecessaryComparison = false
 reportUnnecessaryCast = false
