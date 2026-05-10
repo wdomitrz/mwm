@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 ################################################################
 # Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 # AGPL License
@@ -372,6 +372,7 @@ class MacApi:
     appkit: Any
     core: Any
     hiservices: Any
+    objc: Any
     quartz: Any
 
     AX_WINDOW_NUMBER_ATTRIBUTE: ClassVar[str] = "AXWindowNumber"
@@ -382,6 +383,7 @@ class MacApi:
             import AppKit  # pyright: ignore[reportMissingImports]
             import CoreFoundation  # pyright: ignore[reportMissingImports]
             import HIServices  # pyright: ignore[reportMissingImports]
+            import objc  # pyright: ignore[reportMissingImports]
             import Quartz  # pyright: ignore[reportMissingImports]
         except ImportError as error:
             msg = (
@@ -390,7 +392,11 @@ class MacApi:
             )
             raise RuntimeError(msg) from error
         return cls(
-            appkit=AppKit, core=CoreFoundation, hiservices=HIServices, quartz=Quartz
+            appkit=AppKit,
+            core=CoreFoundation,
+            hiservices=HIServices,
+            objc=objc,
+            quartz=Quartz,
         )
 
     def ensure_accessibility(self) -> None:
@@ -577,13 +583,14 @@ class MacApi:
                 continue
             for window in raw_windows:
                 info = self.window_info(
-                    window, pid=pid, screens=screens, visible_index=visible_index
+                    window,
+                    pid=pid,
+                    screens=screens,
+                    visible_index=visible_index,
                 )
                 if info is not None:
                     windows.append(info)
-        return tuple(
-            sorted(windows, key=lambda item: (item.screen_key, item.order, item.title))
-        )
+        return tuple(sorted(windows, key=window_sort_key))
 
     def window_info(
         self,
@@ -615,13 +622,9 @@ class MacApi:
         if not visible_index.contains(pid=pid, number=number, frame=frame):
             return None
         title = str(self.ax_get(window, self.hiservices.kAXTitleAttribute) or "")
-        order = visible_index.order(pid=pid, number=number, frame=frame)
-        fallback_title = title or f"untitled-{order}"
-        key = (
-            f"{pid}:{number}"
-            if number is not None
-            else f"{pid}:fallback:{order}:{fallback_title}"
-        )
+        stable_id = self.window_stable_id(window)
+        order = number if number is not None else stable_id
+        key = f"{pid}:{number}" if number is not None else f"{pid}:fallback:{stable_id}"
         return WindowInfo(
             key=key,
             pid=pid,
@@ -641,6 +644,9 @@ class MacApi:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def window_stable_id(self, window: Any) -> int:
+        return int(self.core.CFHash(window))
 
 
 @dataclass(kw_only=True)
@@ -816,6 +822,7 @@ class WindowDaemon:
         self.observed_windows: set[str] = set()
         self.lock = threading.RLock()
         self.pending_ipc_calls: queue.Queue[PendingIpcCall] = queue.Queue()
+        self.ax_callback = self._make_ax_callback(api=api)
         self.running = False
         self.ipc_thread: threading.Thread | None = None
         self.tick_timer: Any | None = None
@@ -823,6 +830,14 @@ class WindowDaemon:
         self.retile_at: float | None = None
         self.ignore_events_until = 0.0
         self.run_loop: Any | None = None
+
+    def _make_ax_callback(self, *, api: MacApi) -> Any:
+        def callback(
+            observer: Any, element: Any, notification: str, refcon: Any
+        ) -> None:
+            self._ax_callback(observer, element, notification, refcon)
+
+        return api.objc.callbackFor(api.hiservices.AXObserverCreate)(callback)
 
     def run(self) -> int:
         self.api.ensure_accessibility()
@@ -1007,7 +1022,7 @@ class WindowDaemon:
     def _observe_app(self, *, pid: int) -> None:
         app = self.api.hiservices.AXUIElementCreateApplication(pid)
         error, observer = self.api.hiservices.AXObserverCreate(
-            pid, self._ax_callback, None
+            pid, self.ax_callback, None
         )
         if error != self.api.hiservices.kAXErrorSuccess:
             return
@@ -1219,6 +1234,15 @@ def group_windows_by_screen(
     return {screen_key: tuple(items) for screen_key, items in grouped.items()}
 
 
+def window_sort_key(window: WindowInfo) -> tuple[str, int, int, str]:
+    """Return a stable collection order for initial placement and new windows.
+
+    >>> window_sort_key(_Test.window("b", order=2)) < window_sort_key(_Test.window("a", order=1))
+    False
+    """
+    return (window.screen_key, window.pid, window.order, window.key)
+
+
 def layout_targets(
     *,
     screen: ScreenInfo,
@@ -1415,8 +1439,16 @@ class _MemoryApi:
     windows: tuple[WindowInfo, ...]
     screen_values: tuple[ScreenInfo, ...]
     focused_key: str
+    hiservices: Any = None
+    objc: Any = None
     frames: dict[str, Rect] = field(default_factory=dict)
     focused_history: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.hiservices is None:
+            self.hiservices = _MemoryHiservices()
+        if self.objc is None:
+            self.objc = _MemoryObjc()
 
     def collect_windows(self) -> tuple[WindowInfo, ...]:
         return self.windows
@@ -1435,6 +1467,19 @@ class _MemoryApi:
     def focus_window(self, window: WindowInfo) -> None:
         self.focused_key = window.key
         self.focused_history.append(window.key)
+
+
+class _MemoryHiservices:
+    AXObserverCreate: ClassVar[object] = object()
+
+
+class _MemoryObjc:
+    @staticmethod
+    def callbackFor(_function: object) -> Any:  # noqa: N802
+        def decorate(callback: Any) -> Any:
+            return callback
+
+        return decorate
 
 
 class _Test:
