@@ -29,7 +29,7 @@ ignore = [
 extend-select = ["I"]
 
 [tool.ruff.lint.per-file-ignores]
-"m3.py" = ["ANN401", "BLE001", "PLC0415"]
+"mwm.py" = ["ANN401", "BLE001", "PLC0415"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
