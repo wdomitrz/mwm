@@ -1,0 +1,19 @@
+{
+  "alt-h": "focus left",
+  "alt-j": "focus down",
+  "alt-k": "focus up",
+  "alt-l": "focus right",
+  "shift-alt-h": "move left",
+  "shift-alt-j": "move down",
+  "shift-alt-k": "move up",
+  "shift-alt-l": "move right",
+  "alt-f": "fullscreen",
+  "alt-r": "retile",
+  "ctrl-alt-1": "columns 1",
+  "ctrl-alt-2": "columns 2",
+  "ctrl-alt-3": "columns 3",
+  "ctrl-alt-4": "columns 2.5",
+  "ctrl-alt-5": "columns 1.7",
+  "ctrl-alt-s": "status",
+  "ctrl-alt-q": "stop"
+}

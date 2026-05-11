@@ -6,6 +6,7 @@
 #
 # /// script
 # dependencies = [
+#   "pynput",
 #   "pyobjc-framework-ApplicationServices",
 #   "pyobjc-framework-Cocoa",
 #   "pyobjc-framework-Quartz",
@@ -15,10 +16,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import os
 import queue
+import shlex
 import signal
 import socket
 import sys
@@ -28,9 +31,11 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import ClassVar, Literal, Protocol, assert_never, cast
 
 Direction = Literal["left", "right", "up", "down"]
+ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
 CommandKind = Literal[
     "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
 ]
@@ -38,7 +43,10 @@ CliCommand = Literal[
     "daemon", "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
 ]
 JsonMap = dict[str, object]
+JsonObject = dict[str, object]
 PAIR_LENGTH: int = 2
+COMMAND_WITH_ARG_LENGTH: int = 2
+COMMAND_WITHOUT_ARG_LENGTH: int = 1
 FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
 CLIENT_COMMANDS_WITHOUT_ARGS: tuple[
     Literal["fullscreen", "retile", "status", "stop"], ...
@@ -162,6 +170,15 @@ def default_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     base = Path(runtime_dir) if runtime_dir else Path(tempfile.gettempdir())
     return base / f"m3-{os.getuid()}.sock"
+
+
+def import_keyboard() -> DynamicObjC:
+    try:
+        module = importlib.import_module("pynput.keyboard")
+    except ImportError as error:
+        msg = "pynput is required for built-in keybindings; use --no-keybindings to run without it."
+        raise RuntimeError(msg) from error
+    return cast(DynamicObjC, cast(ModuleType, module))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -494,6 +511,299 @@ class PendingIpcCall:
         if self.response is None:
             return IpcResponse(ok=False, message="daemon did not produce a response")
         return self.response
+
+
+@dataclass(frozen=True, kw_only=True)
+class KeyChord:
+    modifiers: tuple[ModifierName, ...]
+    key: str
+
+    MODIFIER_ORDER: ClassVar[dict[ModifierName, int]] = {
+        "cmd": 0,
+        "ctrl": 1,
+        "alt": 2,
+        "shift": 3,
+    }
+    MODIFIER_ALIASES: ClassVar[dict[str, ModifierName]] = {
+        "cmd": "cmd",
+        "cmd_l": "cmd",
+        "cmd_r": "cmd",
+        "command": "cmd",
+        "ctrl": "ctrl",
+        "ctrl_l": "ctrl",
+        "ctrl_r": "ctrl",
+        "control": "ctrl",
+        "alt": "alt",
+        "alt_l": "alt",
+        "alt_r": "alt",
+        "option": "alt",
+        "shift": "shift",
+        "shift_l": "shift",
+        "shift_r": "shift",
+    }
+    KEY_ALIASES: ClassVar[dict[str, str]] = {
+        "return": "enter",
+        "escape": "esc",
+        "spacebar": "space",
+        "left": "left",
+        "right": "right",
+        "up": "up",
+        "down": "down",
+    }
+    VK_ALIASES: ClassVar[dict[int, str]] = {
+        0x00: "a",
+        0x01: "s",
+        0x02: "d",
+        0x03: "f",
+        0x04: "h",
+        0x05: "g",
+        0x06: "z",
+        0x07: "x",
+        0x08: "c",
+        0x09: "v",
+        0x0B: "b",
+        0x0C: "q",
+        0x0D: "w",
+        0x0E: "e",
+        0x0F: "r",
+        0x10: "y",
+        0x11: "t",
+        0x12: "1",
+        0x13: "2",
+        0x14: "3",
+        0x15: "4",
+        0x16: "6",
+        0x17: "5",
+        0x20: "u",
+        0x22: "i",
+        0x23: "p",
+        0x25: "l",
+        0x26: "j",
+        0x28: "k",
+        0x2D: "n",
+        0x2E: "m",
+        0x2F: ".",
+    }
+
+    @classmethod
+    def parse(cls, value: str) -> KeyChord:
+        raw_tokens = value.replace("+", "-").split("-")
+        tokens = [token.strip().casefold() for token in raw_tokens if token.strip()]
+        if not tokens:
+            msg = "key chord must not be empty"
+            raise ValueError(msg)
+        key = cls.normalise_key(tokens[-1])
+        modifier_set: set[ModifierName] = {
+            cls.normalise_modifier(token) for token in tokens[:-1]
+        }
+        modifiers = tuple(
+            sorted(
+                modifier_set,
+                key=lambda item: cls.MODIFIER_ORDER[item],
+            )
+        )
+        return cls(modifiers=modifiers, key=key)
+
+    @classmethod
+    def from_event_key(cls, key: object) -> str | None:
+        name = getattr(key, "name", None)
+        if isinstance(name, str):
+            return cls.KEY_ALIASES.get(name, cls.MODIFIER_ALIASES.get(name, name))
+        vk = getattr(key, "vk", None)
+        if isinstance(vk, int):
+            return cls.VK_ALIASES.get(vk, f"vk:{vk}")
+        char = getattr(key, "char", None)
+        if isinstance(char, str) and char:
+            return cls.normalise_key(char)
+        return None
+
+    @classmethod
+    def normalise_modifier(cls, value: str) -> ModifierName:
+        modifier = cls.MODIFIER_ALIASES.get(value.strip().casefold())
+        if modifier is None:
+            msg = f"unknown modifier: {value}"
+            raise ValueError(msg)
+        return modifier
+
+    @classmethod
+    def modifier_from_event_key(cls, value: str) -> ModifierName | None:
+        return cls.MODIFIER_ALIASES.get(value)
+
+    @classmethod
+    def normalise_key(cls, value: str) -> str:
+        token = value.strip().casefold()
+        if token.startswith("0x"):
+            return f"vk:{int(token, 0)}"
+        return cls.KEY_ALIASES.get(token, token)
+
+    def matches(self, *, key: str, modifiers: set[ModifierName]) -> bool:
+        return self.key == key and set(self.modifiers) == modifiers
+
+
+@dataclass(frozen=True, kw_only=True)
+class KeyBinding:
+    chord: KeyChord
+    request: IpcRequest
+
+
+def default_keybindings() -> tuple[KeyBinding, ...]:
+    return parse_keybinding_map(
+        {
+            "alt-h": "focus left",
+            "alt-j": "focus down",
+            "alt-k": "focus up",
+            "alt-l": "focus right",
+            "shift-alt-h": "move left",
+            "shift-alt-j": "move down",
+            "shift-alt-k": "move up",
+            "shift-alt-l": "move right",
+            "alt-f": "fullscreen",
+            "alt-r": "retile",
+            "ctrl-alt-1": "columns 1",
+            "ctrl-alt-2": "columns 2",
+            "ctrl-alt-3": "columns 3",
+            "ctrl-alt-4": "columns 2.5",
+            "ctrl-alt-5": "columns 1.7",
+            "ctrl-alt-s": "status",
+            "ctrl-alt-q": "stop",
+        }
+    )
+
+
+def load_keybindings(path: Path | None) -> tuple[KeyBinding, ...]:
+    if path is None:
+        return default_keybindings()
+    raw = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    config = cast(JsonObject, raw)
+    bindings = config.get("bindings", config)
+    assert isinstance(bindings, dict)
+    return parse_keybinding_map(cast(JsonObject, bindings))
+
+
+def parse_keybinding_map(raw: Mapping[str, object]) -> tuple[KeyBinding, ...]:
+    """Parse a simple chord-to-command JSON object.
+
+    >>> [binding.request for binding in parse_keybinding_map({"alt-h": "focus left", "alt-f": "fullscreen"})]
+    [IpcRequest(kind='focus', direction='left', columns=None), IpcRequest(kind='fullscreen', direction=None, columns=None)]
+    """
+    return tuple(
+        KeyBinding(
+            chord=KeyChord.parse(chord),
+            request=parse_binding_command(str(command)),
+        )
+        for chord, command in raw.items()
+    )
+
+
+def parse_binding_command(command: str) -> IpcRequest:
+    """Parse the command side of a keybinding.
+
+    >>> parse_binding_command("move left")
+    IpcRequest(kind='move', direction='left', columns=None)
+    >>> parse_binding_command("columns 1.7")
+    IpcRequest(kind='columns', direction=None, columns=1.7)
+    """
+    parts = shlex.split(command)
+    assert parts
+    kind = parse_command_kind(parts[0])
+    match kind:
+        case "focus" | "move":
+            assert len(parts) == COMMAND_WITH_ARG_LENGTH
+            return IpcRequest(kind=kind, direction=parse_direction(parts[1]))
+        case "columns":
+            assert len(parts) == COMMAND_WITH_ARG_LENGTH
+            return IpcRequest(kind=kind, columns=float(parts[1]))
+        case "fullscreen" | "retile" | "status" | "stop":
+            assert len(parts) == COMMAND_WITHOUT_ARG_LENGTH
+            return IpcRequest(kind=kind)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+class KeyBindingManager:
+    def __init__(
+        self, *, bindings: tuple[KeyBinding, ...], submit: Callable[[IpcRequest], None]
+    ) -> None:
+        self.bindings = bindings
+        self.submit = submit
+        self.lock = threading.RLock()
+        self.pressed_modifiers: set[ModifierName] = set()
+        self.pressed_keys: set[str] = set()
+        self.suppressed_releases: set[str] = set()
+        self.consume_current_event = False
+        self.listener: object | None = None
+
+    def start(self) -> None:
+        keyboard = import_keyboard()
+        listener = keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release,
+            suppress=False,
+            darwin_intercept=self._intercept,
+        )
+        listener.start()
+        listener.wait()
+        self.listener = listener
+
+    def stop(self) -> None:
+        if self.listener is None:
+            return
+        listener = cast(DynamicObjC, self.listener)
+        listener.stop()
+        listener.join(timeout=2)
+        self.listener = None
+
+    def _on_press(self, key: object, injected: object = None) -> None:
+        with self.lock:
+            self.consume_current_event = False
+            if injected is True:
+                return
+            key_name = KeyChord.from_event_key(key)
+            if key_name is None:
+                return
+            if modifier := KeyChord.modifier_from_event_key(key_name):
+                self.pressed_modifiers.add(modifier)
+                return
+            repeated = key_name in self.pressed_keys
+            self.pressed_keys.add(key_name)
+            consume = self._handle_key_press(key_name, repeated=repeated)
+            self.consume_current_event = consume
+            if consume:
+                self.suppressed_releases.add(key_name)
+
+    def _on_release(self, key: object, injected: object = None) -> None:
+        with self.lock:
+            self.consume_current_event = False
+            if injected is True:
+                return
+            key_name = KeyChord.from_event_key(key)
+            if key_name is None:
+                return
+            if modifier := KeyChord.modifier_from_event_key(key_name):
+                self.pressed_modifiers.discard(modifier)
+                return
+            self.pressed_keys.discard(key_name)
+            if key_name in self.suppressed_releases:
+                self.suppressed_releases.remove(key_name)
+                self.consume_current_event = True
+
+    def _intercept(self, _event_type: object, event: object) -> object | None:
+        with self.lock:
+            consume = self.consume_current_event
+            self.consume_current_event = False
+        return None if consume else event
+
+    def _handle_key_press(self, key_name: str, *, repeated: bool) -> bool:
+        if repeated:
+            return False
+        for binding in self.bindings:
+            if binding.chord.matches(
+                key=key_name, modifiers=self.pressed_modifiers
+            ):
+                self.submit(binding.request)
+                return True
+        return False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -970,7 +1280,13 @@ class WindowDaemon:
     IPC_RESPONSE_TIMEOUT_SECONDS: ClassVar[float] = 10.0
     TICK_SECONDS: ClassVar[float] = 0.05
 
-    def __init__(self, *, config: LayoutConfig, api: MacApi) -> None:
+    def __init__(
+        self,
+        *,
+        config: LayoutConfig,
+        api: MacApi,
+        keybindings: tuple[KeyBinding, ...] | None = None,
+    ) -> None:
         self.config = config
         self.api = api
         self.state = LayoutState()
@@ -979,6 +1295,11 @@ class WindowDaemon:
         self.lock = threading.RLock()
         self.pending_ipc_calls: queue.Queue[PendingIpcCall] = queue.Queue()
         self.ax_callback = self._make_ax_callback(api=api)
+        self.keybinding_manager = (
+            KeyBindingManager(bindings=keybindings, submit=self.submit_keybinding)
+            if keybindings is not None
+            else None
+        )
         self.running = False
         self.ipc_thread: threading.Thread | None = None
         self.tick_timer: object | None = None
@@ -1002,6 +1323,8 @@ class WindowDaemon:
         self.run_loop = self.api.core.CFRunLoopGetCurrent()
         self._install_signal_handlers()
         self._start_ipc()
+        if self.keybinding_manager is not None:
+            self.keybinding_manager.start()
         self.refresh_observers()
         self.retile()
         self.next_periodic_at = time.monotonic() + self.config.poll_seconds
@@ -1079,6 +1402,11 @@ class WindowDaemon:
         self.pending_ipc_calls.put(call)
         self._wake_run_loop()
         return call.wait(timeout=self.IPC_RESPONSE_TIMEOUT_SECONDS)
+
+    def submit_keybinding(self, request: IpcRequest) -> None:
+        if self.running:
+            self.pending_ipc_calls.put(PendingIpcCall(payload=request.to_json()))
+            self._wake_run_loop()
 
     def _wake_run_loop(self) -> None:
         if self.run_loop is not None:
@@ -1390,6 +1718,8 @@ class WindowDaemon:
         return arranged
 
     def _cleanup(self) -> None:
+        if self.keybinding_manager is not None:
+            self.keybinding_manager.stop()
         if self.tick_timer is not None:
             self.api.core.CFRunLoopTimerInvalidate(self.tick_timer)
         self._answer_pending_calls(
@@ -1929,6 +2259,11 @@ ValueError: unknown command: bogus
 Traceback (most recent call last):
 ...
 ValueError: unknown direction: north
+>>> from types import SimpleNamespace
+>>> KeyChord.from_event_key(SimpleNamespace(vk=4, char="ķ"))
+'h'
+>>> KeyChord.parse("alt-h").matches(key="h", modifiers={"alt"})
+True
 """,
     "daemon_with_memory_api": """
 >>> daemon, api = _Test.daemon()
@@ -1969,6 +2304,8 @@ class DaemonArgs:
     gap: int
     poll_seconds: float
     socket_path: Path | None
+    keybindings_enabled: bool
+    keybindings_path: Path | None
 
     def main(self) -> int:
         config = LayoutConfig(
@@ -1977,7 +2314,10 @@ class DaemonArgs:
             poll_seconds=self.poll_seconds,
             socket_path=self.socket_path or Ipc.default_socket_path(),
         )
-        daemon = WindowDaemon(config=config, api=MacApi.load())
+        keybindings = (
+            load_keybindings(self.keybindings_path) if self.keybindings_enabled else None
+        )
+        daemon = WindowDaemon(config=config, api=MacApi.load(), keybindings=keybindings)
         return daemon.run()
 
 
@@ -2009,6 +2349,11 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument("--gap", "-g", type=int, default=0)
     daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+    daemon_parser.add_argument("--keybindings", type=Path, default=None)
+    daemon_parser.add_argument(
+        "--no-keybindings", action="store_false", dest="keybindings_enabled"
+    )
+    daemon_parser.set_defaults(keybindings_enabled=True)
 
     for command in FOCUS_MOVE_COMMANDS:
         command_parser = subparsers.add_parser(command)
@@ -2050,11 +2395,15 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             gap = cast(int, args.gap)
             poll_seconds = cast(float, args.poll_seconds)
             socket_path = cast(Path | None, args.socket_path)
+            keybindings_enabled = cast(bool, args.keybindings_enabled)
+            keybindings_path = cast(Path | None, args.keybindings)
             return DaemonArgs(
                 columns=columns,
                 gap=gap,
                 poll_seconds=poll_seconds,
                 socket_path=socket_path,
+                keybindings_enabled=keybindings_enabled,
+                keybindings_path=keybindings_path,
             )
         case "focus" | "move":
             direction = cast(str, args.direction)

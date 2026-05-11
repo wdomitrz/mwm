@@ -10,6 +10,23 @@ Start the daemon:
 ./m3.py daemon --columns 2.5
 ```
 
+The daemon starts with built-in keybindings matching `skhdrc.sample`. To run
+without keybindings:
+
+```sh
+./m3.py daemon --no-keybindings
+```
+
+To use a simple JSON keybinding file:
+
+```sh
+./m3.py daemon --keybindings keybindings.sample.json
+```
+
+On macOS, keybindings are matched by physical key code where possible, so
+`alt-h` still means the `h` key even if Option would normally type a different
+character.
+
 Useful client commands:
 
 ```sh
