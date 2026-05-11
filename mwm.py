@@ -178,7 +178,7 @@ def parse_ax_size(raw: object) -> AxSize:
 def default_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     base = Path(runtime_dir) if runtime_dir else Path(tempfile.gettempdir())
-    return base / f"m3-{os.getuid()}.sock"
+    return base / f"mwm-{os.getuid()}.sock"
 
 
 def import_keyboard() -> DynamicObjC:
@@ -835,7 +835,7 @@ class MacApi:
             import Quartz  # pyright: ignore[reportMissingImports]
         except ImportError as error:
             msg = (
-                "m3 requires PyObjC on macOS. Install the script dependencies with uv, "
+                "mwm requires PyObjC on macOS. Install the script dependencies with uv, "
                 "pipx, or pip on the machine that will run the daemon."
             )
             raise RuntimeError(msg) from error
@@ -1370,7 +1370,7 @@ class WindowDaemon:
                 msg = f"daemon already running at {socket_path}"
                 raise RuntimeError(msg)
             socket_path.unlink()
-        thread = threading.Thread(target=self._serve_ipc, name="m3-ipc", daemon=True)
+        thread = threading.Thread(target=self._serve_ipc, name="mwm-ipc", daemon=True)
         thread.start()
         self.ipc_thread = thread
 
@@ -2342,6 +2342,7 @@ class DaemonArgs:
     socket_path: Path | None
     keybindings_enabled: bool
     keybindings_path: Path | None
+    verbose: bool
 
     def main(self) -> int:
         config = LayoutConfig(
@@ -2361,21 +2362,29 @@ class DaemonArgs:
 class ClientArgs:
     request: IpcRequest
     socket_path: Path | None = None
+    verbose: bool = False
 
     def main(self) -> int:
         response = Ipc.send(
             path=self.socket_path or Ipc.default_socket_path(), request=self.request
         )
-        print(response.message)
+        if self.verbose:
+            output = sys.stdout if response.ok else sys.stderr
+            print(response.message, file=output)
         return 0 if response.ok else 1
 
 
 ParsedCli = DaemonArgs | ClientArgs
 
 
+def add_client_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+    parser.add_argument("--verbose", "-v", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="m3.py",
+        prog="mwm.py",
         description="Small macOS tiling daemon controlled through a Unix socket.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2386,6 +2395,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
     daemon_parser.add_argument("--keybindings", type=Path, default=None)
+    daemon_parser.add_argument("--verbose", "-v", action="store_true")
     daemon_parser.add_argument(
         "--no-keybindings", action="store_false", dest="keybindings_enabled"
     )
@@ -2396,27 +2406,21 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument(
             "direction", choices=("left", "right", "up", "down")
         )
-        command_parser.add_argument(
-            "--socket", type=Path, default=None, dest="socket_path"
-        )
+        add_client_options(command_parser)
 
     fullscreen_parser = subparsers.add_parser("fullscreen")
-    fullscreen_parser.add_argument(
-        "--socket", type=Path, default=None, dest="socket_path"
-    )
+    add_client_options(fullscreen_parser)
 
     close_parser = subparsers.add_parser("close")
-    close_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+    add_client_options(close_parser)
 
     columns_parser = subparsers.add_parser("columns")
     columns_parser.add_argument("number_of_columns", type=float)
-    columns_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+    add_client_options(columns_parser)
 
     for command in UTILITY_COMMANDS:
         command_parser = subparsers.add_parser(command)
-        command_parser.add_argument(
-            "--socket", type=Path, default=None, dest="socket_path"
-        )
+        add_client_options(command_parser)
 
     return parser
 
@@ -2436,6 +2440,7 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             socket_path = cast(Path | None, args.socket_path)
             keybindings_enabled = cast(bool, args.keybindings_enabled)
             keybindings_path = cast(Path | None, args.keybindings)
+            verbose = cast(bool, args.verbose)
             return DaemonArgs(
                 columns=columns,
                 gap=gap,
@@ -2443,24 +2448,34 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
                 socket_path=socket_path,
                 keybindings_enabled=keybindings_enabled,
                 keybindings_path=keybindings_path,
+                verbose=verbose,
             )
         case "focus" | "move":
             direction = cast(str, args.direction)
             socket_path = cast(Path | None, args.socket_path)
+            verbose = cast(bool, args.verbose)
             request = IpcRequest(
                 kind=cast(CommandKind, command),
                 direction=parse_direction(direction),
             )
-            return ClientArgs(request=request, socket_path=socket_path)
+            return ClientArgs(
+                request=request, socket_path=socket_path, verbose=verbose
+            )
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             socket_path = cast(Path | None, args.socket_path)
+            verbose = cast(bool, args.verbose)
             request = IpcRequest(kind=cast(CommandKind, command))
-            return ClientArgs(request=request, socket_path=socket_path)
+            return ClientArgs(
+                request=request, socket_path=socket_path, verbose=verbose
+            )
         case "columns":
             columns = cast(float, args.number_of_columns)
             socket_path = cast(Path | None, args.socket_path)
+            verbose = cast(bool, args.verbose)
             request = IpcRequest(kind="columns", columns=columns)
-            return ClientArgs(request=request, socket_path=socket_path)
+            return ClientArgs(
+                request=request, socket_path=socket_path, verbose=verbose
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
