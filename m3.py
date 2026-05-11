@@ -25,16 +25,137 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Literal, assert_never, cast
+from typing import ClassVar, Literal, Protocol, assert_never, cast
 
 Direction = Literal["left", "right", "up", "down"]
 CommandKind = Literal[
     "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
 ]
-JsonMap = dict[str, Any]
+CliCommand = Literal[
+    "daemon", "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
+]
+JsonMap = dict[str, object]
+PAIR_LENGTH: int = 2
+FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
+CLIENT_COMMANDS_WITHOUT_ARGS: tuple[
+    Literal["fullscreen", "retile", "status", "stop"], ...
+] = ("fullscreen", "retile", "status", "stop")
+UTILITY_COMMANDS: tuple[Literal["retile", "status", "stop"], ...] = (
+    "retile",
+    "status",
+    "stop",
+)
+COMMAND_KINDS: tuple[CommandKind, ...] = (
+    "focus",
+    "move",
+    "fullscreen",
+    "columns",
+    "retile",
+    "status",
+    "stop",
+)
+CLI_COMMANDS: tuple[CliCommand, ...] = ("daemon", *COMMAND_KINDS)
+
+
+class DynamicObjC(Protocol):
+    def __call__(self, *args: object, **kwargs: object) -> DynamicObjC: ...
+    def __getattr__(self, name: str) -> DynamicObjC: ...
+    def __iter__(self) -> Iterator[object]: ...
+    def __bool__(self) -> bool: ...
+    def __int__(self) -> int: ...
+    def __float__(self) -> float: ...
+    def __or__(self, other: object) -> DynamicObjC: ...
+    def __ror__(self, other: object) -> DynamicObjC: ...
+
+
+class CocoaPoint(Protocol):
+    x: float
+    y: float
+
+
+class CocoaSize(Protocol):
+    width: float
+    height: float
+
+
+class CocoaRect(Protocol):
+    origin: CocoaPoint
+    size: CocoaSize
+
+
+@dataclass(frozen=True, kw_only=True)
+class AxPoint:
+    x: float
+    y: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class AxSize:
+    width: float
+    height: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class AxCopyValue:
+    error: object
+    value: object
+
+
+@dataclass(frozen=True, kw_only=True)
+class AxValue:
+    ok: bool
+    value: object
+
+
+def to_float(value: object) -> float:
+    return float(cast(str | bytes | int | float, value))
+
+
+def to_int(value: object) -> int:
+    return int(cast(str | bytes | int | float, value))
+
+
+def parse_json_map(payload: bytes) -> JsonMap:
+    raw = json.loads(payload.decode())
+    assert isinstance(raw, dict)
+    return cast(JsonMap, raw)
+
+
+def parse_pair(raw: object) -> tuple[object, object]:
+    pair = cast(tuple[object, ...], raw) if isinstance(raw, tuple) else None
+    assert pair is not None
+    assert len(pair) == PAIR_LENGTH
+    first, second = pair
+    return (first, second)
+
+
+def parse_ax_copy_value(raw: object) -> AxCopyValue:
+    error, value = parse_pair(raw)
+    return AxCopyValue(error=error, value=value)
+
+
+def parse_ax_value(raw: object) -> AxValue:
+    ok, value = parse_pair(raw)
+    return AxValue(ok=bool(ok), value=value)
+
+
+def parse_ax_point(raw: object) -> AxPoint:
+    if isinstance(raw, tuple):
+        x, y = parse_pair(cast(tuple[object, ...], raw))
+        return AxPoint(x=to_float(x), y=to_float(y))
+    point = cast(CocoaPoint, raw)
+    return AxPoint(x=float(point.x), y=float(point.y))
+
+
+def parse_ax_size(raw: object) -> AxSize:
+    if isinstance(raw, tuple):
+        width, height = parse_pair(cast(tuple[object, ...], raw))
+        return AxSize(width=to_float(width), height=to_float(height))
+    size = cast(CocoaSize, raw)
+    return AxSize(width=float(size.width), height=float(size.height))
 
 
 def default_socket_path() -> Path:
@@ -54,12 +175,16 @@ class Rect:
     MIN_HEIGHT: ClassVar[int] = 40
 
     @classmethod
-    def from_ax_rect(cls, raw: tuple[tuple[float, float], tuple[float, float]]) -> Rect:
-        (x, y), (width, height) = raw
-        return cls(x=round(x), y=round(y), width=round(width), height=round(height))
+    def from_ax_values(cls, *, position: AxPoint, size: AxSize) -> Rect:
+        return cls(
+            x=round(position.x),
+            y=round(position.y),
+            width=round(size.width),
+            height=round(size.height),
+        )
 
     @classmethod
-    def from_quartz_bounds(cls, raw: Mapping[str, Any]) -> Rect | None:
+    def from_quartz_bounds(cls, raw: Mapping[object, object]) -> Rect | None:
         """Convert a CGWindow bounds dictionary into a rectangle.
 
         >>> Rect.from_quartz_bounds({"X": 1.2, "Y": 3.8, "Width": 10, "Height": 20})
@@ -68,10 +193,10 @@ class Rect:
         """
         try:
             return cls(
-                x=round(float(raw["X"])),
-                y=round(float(raw["Y"])),
-                width=round(float(raw["Width"])),
-                height=round(float(raw["Height"])),
+                x=round(to_float(raw["X"])),
+                y=round(to_float(raw["Y"])),
+                width=round(to_float(raw["Width"])),
+                height=round(to_float(raw["Height"])),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -79,7 +204,7 @@ class Rect:
     @classmethod
     def from_cocoa_rect(
         cls,
-        raw: Any,
+        raw: CocoaRect,
         *,
         main_screen_height: float,
     ) -> Rect:
@@ -203,7 +328,7 @@ class Rect:
 class WindowInfo:
     key: str
     pid: int
-    ax: Any
+    ax: object
     title: str
     frame: Rect
     screen_key: str
@@ -310,14 +435,15 @@ class IpcRequest:
 
     @classmethod
     def from_json(cls, payload: bytes) -> IpcRequest:
-        raw = cast(JsonMap, json.loads(payload.decode()))
+        raw = parse_json_map(payload)
+        assert "kind" in raw
         kind = parse_command_kind(str(raw["kind"]))
         direction = (
             parse_direction(str(raw["direction"]))
             if raw.get("direction") is not None
             else None
         )
-        columns = float(raw["columns"]) if raw.get("columns") is not None else None
+        columns = to_float(raw["columns"]) if raw.get("columns") is not None else None
         return cls(kind=kind, direction=direction, columns=columns)
 
     def to_json(self) -> bytes:
@@ -334,7 +460,9 @@ class IpcResponse:
 
     @classmethod
     def from_json(cls, payload: bytes) -> IpcResponse:
-        raw = cast(JsonMap, json.loads(payload.decode()))
+        raw = parse_json_map(payload)
+        assert "ok" in raw
+        assert "message" in raw
         return cls(ok=bool(raw["ok"]), message=str(raw["message"]))
 
     def to_json(self) -> bytes:
@@ -346,8 +474,8 @@ class IpcResponse:
 @dataclass(frozen=True, kw_only=True)
 class AppObserver:
     pid: int
-    app: Any
-    observer: Any
+    app: object
+    observer: object
 
 
 @dataclass(kw_only=True)
@@ -370,11 +498,11 @@ class PendingIpcCall:
 
 @dataclass(frozen=True, kw_only=True)
 class MacApi:
-    appkit: Any
-    core: Any
-    hiservices: Any
-    objc: Any
-    quartz: Any
+    appkit: DynamicObjC
+    core: DynamicObjC
+    hiservices: DynamicObjC
+    objc: DynamicObjC
+    quartz: DynamicObjC
 
     AX_WINDOW_NUMBER_ATTRIBUTE: ClassVar[str] = "AXWindowNumber"
 
@@ -393,11 +521,11 @@ class MacApi:
             )
             raise RuntimeError(msg) from error
         return cls(
-            appkit=AppKit,
-            core=CoreFoundation,
-            hiservices=HIServices,
-            objc=objc,
-            quartz=Quartz,
+            appkit=cast(DynamicObjC, AppKit),
+            core=cast(DynamicObjC, CoreFoundation),
+            hiservices=cast(DynamicObjC, HIServices),
+            objc=cast(DynamicObjC, objc),
+            quartz=cast(DynamicObjC, Quartz),
         )
 
     def ensure_accessibility(self) -> None:
@@ -408,53 +536,55 @@ class MacApi:
         msg = "Accessibility permission is required; grant it in System Settings and start the daemon again."
         raise RuntimeError(msg)
 
-    def ax_get(self, element: Any, attribute: str) -> Any | None:
-        error, value = self.hiservices.AXUIElementCopyAttributeValue(
-            element, attribute, None
+    def ax_get(self, element: object, attribute: object) -> object | None:
+        result = parse_ax_copy_value(
+            self.hiservices.AXUIElementCopyAttributeValue(element, attribute, None),
         )
-        if error != self.hiservices.kAXErrorSuccess:
+        if result.error != self.hiservices.kAXErrorSuccess:
             return None
-        return value
+        return result.value
 
-    def ax_set(self, element: Any, attribute: str, value: Any) -> bool:
+    def ax_set(self, element: object, attribute: object, value: object) -> bool:
         error = self.hiservices.AXUIElementSetAttributeValue(element, attribute, value)
         return cast(bool, error == self.hiservices.kAXErrorSuccess)
 
-    def ax_action(self, element: Any, action: str) -> bool:
+    def ax_action(self, element: object, action: object) -> bool:
         error = self.hiservices.AXUIElementPerformAction(element, action)
         return cast(bool, error == self.hiservices.kAXErrorSuccess)
 
-    def ax_pid(self, element: Any) -> int | None:
-        error, pid = self.hiservices.AXUIElementGetPid(element, None)
-        if error != self.hiservices.kAXErrorSuccess:
+    def ax_pid(self, element: object) -> int | None:
+        result = parse_ax_copy_value(self.hiservices.AXUIElementGetPid(element, None))
+        if result.error != self.hiservices.kAXErrorSuccess:
             return None
-        return int(pid)
+        return to_int(result.value)
 
-    def ax_bool(self, element: Any, attribute: str, *, default: bool = False) -> bool:
+    def ax_bool(self, element: object, attribute: object, *, default: bool = False) -> bool:
         value = self.ax_get(element, attribute)
         if value is None:
             return default
         return bool(value)
 
-    def ax_point(self, value: Any) -> tuple[float, float] | None:
-        ok, point = self.hiservices.AXValueGetValue(
-            value, self.hiservices.kAXValueTypeCGPoint, None
+    def ax_point(self, value: object) -> AxPoint | None:
+        result = parse_ax_value(
+            self.hiservices.AXValueGetValue(
+                value, self.hiservices.kAXValueTypeCGPoint, None
+            ),
         )
-        if not ok:
+        if not result.ok:
             return None
-        x, y = cast(tuple[float, float], point)
-        return (float(x), float(y))
+        return parse_ax_point(result.value)
 
-    def ax_size(self, value: Any) -> tuple[float, float] | None:
-        ok, size = self.hiservices.AXValueGetValue(
-            value, self.hiservices.kAXValueTypeCGSize, None
+    def ax_size(self, value: object) -> AxSize | None:
+        result = parse_ax_value(
+            self.hiservices.AXValueGetValue(
+                value, self.hiservices.kAXValueTypeCGSize, None
+            ),
         )
-        if not ok:
+        if not result.ok:
             return None
-        width, height = cast(tuple[float, float], size)
-        return (float(width), float(height))
+        return parse_ax_size(result.value)
 
-    def ax_frame(self, window: Any) -> Rect | None:
+    def ax_frame(self, window: object) -> Rect | None:
         position_value = self.ax_get(window, self.hiservices.kAXPositionAttribute)
         size_value = self.ax_get(window, self.hiservices.kAXSizeAttribute)
         if position_value is None or size_value is None:
@@ -463,7 +593,7 @@ class MacApi:
         size = self.ax_size(size_value)
         if position is None or size is None:
             return None
-        return Rect.from_ax_rect((position, size))
+        return Rect.from_ax_values(position=position, size=size)
 
     def set_frame(self, window: WindowInfo, frame: Rect) -> None:
         point = self.hiservices.AXValueCreate(
@@ -483,7 +613,7 @@ class MacApi:
         _ = self.ax_action(window.ax, self.hiservices.kAXRaiseAction)
 
     def screens(self) -> tuple[ScreenInfo, ...]:
-        screens = tuple(self.appkit.NSScreen.screens())
+        screens = tuple(cast(Iterable[DynamicObjC], self.appkit.NSScreen.screens()))
         if not screens:
             return ()
         main_screen = self.appkit.NSScreen.mainScreen() or screens[0]
@@ -491,7 +621,8 @@ class MacApi:
         result: list[ScreenInfo] = []
         for index, screen in enumerate(screens):
             frame = Rect.from_cocoa_rect(
-                screen.visibleFrame(), main_screen_height=main_screen_height
+                cast(CocoaRect, screen.visibleFrame()),
+                main_screen_height=main_screen_height,
             )
             result.append(ScreenInfo(key=f"{index}:{frame.as_key()}", frame=frame))
         return tuple(result)
@@ -499,7 +630,7 @@ class MacApi:
     def running_pids(self) -> tuple[int, ...]:
         workspace = self.appkit.NSWorkspace.sharedWorkspace()
         pids: list[int] = []
-        for app in workspace.runningApplications():
+        for app in cast(Iterable[DynamicObjC], workspace.runningApplications()):
             pid = int(app.processIdentifier())
             if pid > 0 and pid != os.getpid():
                 pids.append(pid)
@@ -510,28 +641,31 @@ class MacApi:
             self.quartz.kCGWindowListOptionOnScreenOnly
             | self.quartz.kCGWindowListExcludeDesktopElements
         )
-        raw_windows = self.quartz.CGWindowListCopyWindowInfo(
-            options, self.quartz.kCGNullWindowID
+        raw_windows = cast(
+            Iterable[Mapping[object, object]],
+            self.quartz.CGWindowListCopyWindowInfo(
+                options, self.quartz.kCGNullWindowID
+            ),
         )
         numbers_by_pid: dict[int, set[int]] = {}
         order_by_pid_number: dict[tuple[int, int], int] = {}
         frames_by_pid: dict[int, list[tuple[int, Rect]]] = {}
         for order, raw in enumerate(raw_windows):
-            if int(raw.get(self.quartz.kCGWindowLayer, 1)) != 0:
+            if to_int(raw.get(self.quartz.kCGWindowLayer, 1)) != 0:
                 continue
             if not bool(raw.get(self.quartz.kCGWindowIsOnscreen, False)):
                 continue
-            alpha = float(raw.get(self.quartz.kCGWindowAlpha, 1.0))
+            alpha = to_float(raw.get(self.quartz.kCGWindowAlpha, 1.0))
             if alpha <= 0:
                 continue
-            pid = int(raw.get(self.quartz.kCGWindowOwnerPID, 0))
-            number = int(raw.get(self.quartz.kCGWindowNumber, 0))
+            pid = to_int(raw.get(self.quartz.kCGWindowOwnerPID, 0))
+            number = to_int(raw.get(self.quartz.kCGWindowNumber, 0))
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
                 order_by_pid_number[(pid, number)] = order
                 bounds = raw.get(self.quartz.kCGWindowBounds)
                 if isinstance(bounds, Mapping):
-                    frame = Rect.from_quartz_bounds(cast(Mapping[str, Any], bounds))
+                    frame = Rect.from_quartz_bounds(cast(Mapping[object, object], bounds))
                     if frame is not None:
                         frames_by_pid.setdefault(pid, []).append((order, frame))
         return VisibleWindowIndex(
@@ -582,7 +716,7 @@ class MacApi:
             raw_windows = self.ax_get(app, self.hiservices.kAXWindowsAttribute)
             if not raw_windows:
                 continue
-            for window in raw_windows:
+            for window in cast(Iterable[object], raw_windows):
                 info = self.window_info(
                     window,
                     pid=pid,
@@ -595,7 +729,7 @@ class MacApi:
 
     def window_info(
         self,
-        window: Any,
+        window: object,
         *,
         pid: int,
         screens: tuple[ScreenInfo, ...],
@@ -637,16 +771,16 @@ class MacApi:
             order=order,
         )
 
-    def window_number(self, window: Any) -> int | None:
+    def window_number(self, window: object) -> int | None:
         value = self.ax_get(window, self.AX_WINDOW_NUMBER_ATTRIBUTE)
         if value is None:
             return None
         try:
-            return int(value)
+            return to_int(value)
         except (TypeError, ValueError):
             return None
 
-    def window_stable_id(self, window: Any) -> int:
+    def window_stable_id(self, window: object) -> int:
         return int(self.core.CFHash(window))
 
 
@@ -847,16 +981,16 @@ class WindowDaemon:
         self.ax_callback = self._make_ax_callback(api=api)
         self.running = False
         self.ipc_thread: threading.Thread | None = None
-        self.tick_timer: Any | None = None
+        self.tick_timer: object | None = None
         self.next_periodic_at = 0.0
         self.retile_at: float | None = None
         self.capture_row_weights_at_retile = False
         self.ignore_events_until = 0.0
-        self.run_loop: Any | None = None
+        self.run_loop: object | None = None
 
-    def _make_ax_callback(self, *, api: MacApi) -> Any:
+    def _make_ax_callback(self, *, api: MacApi) -> object:
         def callback(
-            observer: Any, element: Any, notification: str, refcon: Any
+            observer: object, element: object, notification: str, refcon: object
         ) -> None:
             self._ax_callback(observer, element, notification, refcon)
 
@@ -878,7 +1012,7 @@ class WindowDaemon:
         return 0
 
     def _install_signal_handlers(self) -> None:
-        def stop_from_signal(_signum: int, _frame: Any) -> None:
+        def stop_from_signal(_signum: int, _frame: object) -> None:
             self.stop()
 
         signal.signal(signal.SIGINT, stop_from_signal)
@@ -906,7 +1040,7 @@ class WindowDaemon:
         run_loop = self.run_loop or self.api.core.CFRunLoopGetCurrent()
         self.tick_timer = self.api.core.CFRunLoopTimerCreate(
             None,
-            self.api.core.CFAbsoluteTimeGetCurrent() + self.TICK_SECONDS,
+            float(self.api.core.CFAbsoluteTimeGetCurrent()) + self.TICK_SECONDS,
             self.TICK_SECONDS,
             0,
             0,
@@ -970,7 +1104,7 @@ class WindowDaemon:
             return IpcResponse(ok=False, message=str(error))
         return IpcResponse(ok=True, message=message)
 
-    def _tick(self, _timer: Any, _info: Any) -> None:
+    def _tick(self, _timer: object, _info: object) -> None:
         with self.lock:
             self._drain_ipc_calls()
             if not self.running:
@@ -1033,8 +1167,8 @@ class WindowDaemon:
             for pid in tuple(self.observers):
                 if pid not in running_pids:
                     del self.observers[pid]
-            for pid in sorted(running_pids - set(self.observers)):
-                self._observe_app(pid=pid)
+        for pid in sorted(running_pids - set(self.observers)):
+            self._observe_app(pid=pid)
             windows = self.api.collect_windows()
             self.observed_windows.intersection_update(
                 {window.key for window in windows}
@@ -1044,15 +1178,15 @@ class WindowDaemon:
 
     def _observe_app(self, *, pid: int) -> None:
         app = self.api.hiservices.AXUIElementCreateApplication(pid)
-        error, observer = self.api.hiservices.AXObserverCreate(
-            pid, self.ax_callback, None
+        result = parse_ax_copy_value(
+            self.api.hiservices.AXObserverCreate(pid, self.ax_callback, None)
         )
-        if error != self.api.hiservices.kAXErrorSuccess:
+        if result.error != self.api.hiservices.kAXErrorSuccess:
             return
-        self.observers[pid] = AppObserver(pid=pid, app=app, observer=observer)
+        self.observers[pid] = AppObserver(pid=pid, app=app, observer=result.value)
         self.api.core.CFRunLoopAddSource(
             self.run_loop or self.api.core.CFRunLoopGetCurrent(),
-            self.api.hiservices.AXObserverGetRunLoopSource(observer),
+            self.api.hiservices.AXObserverGetRunLoopSource(result.value),
             self.api.core.kCFRunLoopCommonModes,
         )
         for notification in (
@@ -1080,7 +1214,7 @@ class WindowDaemon:
             )
         self.observed_windows.add(window.key)
 
-    def _add_notification(self, *, pid: int, element: Any, notification: str) -> None:
+    def _add_notification(self, *, pid: int, element: object, notification: object) -> None:
         observer = self.observers.get(pid)
         if observer is None:
             return
@@ -1094,24 +1228,30 @@ class WindowDaemon:
             return
 
     def _ax_callback(
-        self, _observer: Any, _element: Any, notification: str, _refcon: Any
+        self, _observer: object, _element: object, notification: str, _refcon: object
     ) -> None:
-        if notification in (
-            self.api.hiservices.kAXWindowCreatedNotification,
-            self.api.hiservices.kAXFocusedWindowChangedNotification,
-            self.api.hiservices.kAXMainWindowChangedNotification,
-            self.api.hiservices.kAXUIElementDestroyedNotification,
-            self.api.hiservices.kAXWindowMiniaturizedNotification,
-            self.api.hiservices.kAXWindowDeminiaturizedNotification,
+        if notification in cast(
+            tuple[object, ...],
+            (
+                self.api.hiservices.kAXWindowCreatedNotification,
+                self.api.hiservices.kAXFocusedWindowChangedNotification,
+                self.api.hiservices.kAXMainWindowChangedNotification,
+                self.api.hiservices.kAXUIElementDestroyedNotification,
+                self.api.hiservices.kAXWindowMiniaturizedNotification,
+                self.api.hiservices.kAXWindowDeminiaturizedNotification,
+            ),
         ):
             self.refresh_observers()
         self.schedule_retile(
             capture_row_weights=notification
-            in (
-                self.api.hiservices.kAXMovedNotification,
-                self.api.hiservices.kAXResizedNotification,
-                self.api.hiservices.kAXWindowMovedNotification,
-                self.api.hiservices.kAXWindowResizedNotification,
+            in cast(
+                tuple[object, ...],
+                (
+                    self.api.hiservices.kAXMovedNotification,
+                    self.api.hiservices.kAXResizedNotification,
+                    self.api.hiservices.kAXWindowMovedNotification,
+                    self.api.hiservices.kAXWindowResizedNotification,
+                ),
             )
         )
 
@@ -1543,12 +1683,17 @@ def parse_direction(value: str) -> Direction:
 
 
 def parse_command_kind(value: str) -> CommandKind:
-    match value:
-        case "focus" | "move" | "fullscreen" | "columns" | "retile" | "status" | "stop":
-            return cast(CommandKind, value)
-        case _:
-            msg = f"unknown command: {value}"
-            raise ValueError(msg)
+    if value in COMMAND_KINDS:
+        return cast(CommandKind, value)
+    msg = f"unknown command: {value}"
+    raise ValueError(msg)
+
+
+def parse_cli_command(value: str) -> CliCommand:
+    if value in CLI_COMMANDS:
+        return cast(CliCommand, value)
+    msg = f"unknown command: {value}"
+    raise ValueError(msg)
 
 
 @dataclass(kw_only=True)
@@ -1556,8 +1701,8 @@ class _MemoryApi:
     windows: tuple[WindowInfo, ...]
     screen_values: tuple[ScreenInfo, ...]
     focused_key: str
-    hiservices: Any = None
-    objc: Any = None
+    hiservices: object | None = None
+    objc: object | None = None
     frames: dict[str, Rect] = field(default_factory=dict)
     focused_history: list[str] = field(default_factory=list)
 
@@ -1592,8 +1737,8 @@ class _MemoryHiservices:
 
 class _MemoryObjc:
     @staticmethod
-    def callbackFor(_function: object) -> Any:  # noqa: N802
-        def decorate(callback: Any) -> Any:
+    def callbackFor(_function: object) -> Callable[[object], object]:  # noqa: N802
+        def decorate(callback: object) -> object:
             return callback
 
         return decorate
@@ -1666,6 +1811,10 @@ __test__: dict[str, object] = {
 ... )
 >>> Rect.from_cocoa_rect(raw, main_screen_height=900)
 Rect(x=5, y=675, width=100, height=200)
+>>> parse_ax_point(SimpleNamespace(x=1.5, y=2.5))
+AxPoint(x=1.5, y=2.5)
+>>> parse_ax_size(SimpleNamespace(width=300, height=200))
+AxSize(width=300.0, height=200.0)
 >>> Rect.from_quartz_bounds({"X": 1.2, "Y": 3.8, "Width": 10, "Height": 20})
 Rect(x=1, y=4, width=10, height=20)
 >>> rect.contains_point(x=25, y=40)
@@ -1845,6 +1994,9 @@ class ClientArgs:
         return 0 if response.ok else 1
 
 
+ParsedCli = DaemonArgs | ClientArgs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="m3.py",
@@ -1858,7 +2010,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
 
-    for command in ("focus", "move"):
+    for command in FOCUS_MOVE_COMMANDS:
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument(
             "direction", choices=("left", "right", "up", "down")
@@ -1876,7 +2028,7 @@ def build_parser() -> argparse.ArgumentParser:
     columns_parser.add_argument("number_of_columns", type=float)
     columns_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
 
-    for command in ("retile", "status", "stop"):
+    for command in UTILITY_COMMANDS:
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument(
             "--socket", type=Path, default=None, dest="socket_path"
@@ -1885,34 +2037,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_args(args: argparse.Namespace) -> int:
-    match args.command:
+def parse_cli_args(argv: list[str] | None = None) -> ParsedCli:
+    parser = build_parser()
+    return cli_from_namespace(parser.parse_args(argv))
+
+
+def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
+    command = parse_cli_command(cast(str, args.command))
+    match command:
         case "daemon":
+            columns = cast(float, args.columns)
+            gap = cast(int, args.gap)
+            poll_seconds = cast(float, args.poll_seconds)
+            socket_path = cast(Path | None, args.socket_path)
             return DaemonArgs(
-                columns=args.columns,
-                gap=args.gap,
-                poll_seconds=args.poll_seconds,
-                socket_path=args.socket_path,
-            ).main()
-        case "focus" | "move":
-            request = IpcRequest(
-                kind=cast(CommandKind, args.command),
-                direction=parse_direction(args.direction),
+                columns=columns,
+                gap=gap,
+                poll_seconds=poll_seconds,
+                socket_path=socket_path,
             )
-            return ClientArgs(request=request, socket_path=args.socket_path).main()
+        case "focus" | "move":
+            direction = cast(str, args.direction)
+            socket_path = cast(Path | None, args.socket_path)
+            request = IpcRequest(
+                kind=cast(CommandKind, command),
+                direction=parse_direction(direction),
+            )
+            return ClientArgs(request=request, socket_path=socket_path)
         case "fullscreen" | "retile" | "status" | "stop":
-            request = IpcRequest(kind=cast(CommandKind, args.command))
-            return ClientArgs(request=request, socket_path=args.socket_path).main()
+            socket_path = cast(Path | None, args.socket_path)
+            request = IpcRequest(kind=cast(CommandKind, command))
+            return ClientArgs(request=request, socket_path=socket_path)
         case "columns":
-            request = IpcRequest(kind="columns", columns=args.number_of_columns)
-            return ClientArgs(request=request, socket_path=args.socket_path).main()
+            columns = cast(float, args.number_of_columns)
+            socket_path = cast(Path | None, args.socket_path)
+            request = IpcRequest(kind="columns", columns=columns)
+            return ClientArgs(request=request, socket_path=socket_path)
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    return run_args(parser.parse_args(argv))
+    return parse_cli_args(argv).main()
 
 
 if __name__ == "__main__":
