@@ -37,10 +37,18 @@ from typing import ClassVar, Literal, Protocol, assert_never, cast
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
 CommandKind = Literal[
-    "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
+    "focus", "move", "fullscreen", "close", "columns", "retile", "status", "stop"
 ]
 CliCommand = Literal[
-    "daemon", "focus", "move", "fullscreen", "columns", "retile", "status", "stop"
+    "daemon",
+    "focus",
+    "move",
+    "fullscreen",
+    "close",
+    "columns",
+    "retile",
+    "status",
+    "stop",
 ]
 JsonMap = dict[str, object]
 JsonObject = dict[str, object]
@@ -49,8 +57,8 @@ COMMAND_WITH_ARG_LENGTH: int = 2
 COMMAND_WITHOUT_ARG_LENGTH: int = 1
 FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
 CLIENT_COMMANDS_WITHOUT_ARGS: tuple[
-    Literal["fullscreen", "retile", "status", "stop"], ...
-] = ("fullscreen", "retile", "status", "stop")
+    Literal["fullscreen", "close", "retile", "status", "stop"], ...
+] = ("fullscreen", "close", "retile", "status", "stop")
 UTILITY_COMMANDS: tuple[Literal["retile", "status", "stop"], ...] = (
     "retile",
     "status",
@@ -60,6 +68,7 @@ COMMAND_KINDS: tuple[CommandKind, ...] = (
     "focus",
     "move",
     "fullscreen",
+    "close",
     "columns",
     "retile",
     "status",
@@ -657,6 +666,7 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
             "shift-alt-j": "move down",
             "shift-alt-k": "move up",
             "shift-alt-l": "move right",
+            "shift-alt-q": "close",
             "alt-f": "fullscreen",
             "alt-r": "retile",
             "ctrl-alt-1": "columns 1",
@@ -665,7 +675,6 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
             "ctrl-alt-4": "columns 2.5",
             "ctrl-alt-5": "columns 1.7",
             "ctrl-alt-s": "status",
-            "ctrl-alt-q": "stop",
         }
     )
 
@@ -714,7 +723,7 @@ def parse_binding_command(command: str) -> IpcRequest:
         case "columns":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
             return IpcRequest(kind=kind, columns=float(parts[1]))
-        case "fullscreen" | "retile" | "status" | "stop":
+        case "fullscreen" | "close" | "retile" | "status" | "stop":
             assert len(parts) == COMMAND_WITHOUT_ARG_LENGTH
             return IpcRequest(kind=kind)
         case _ as unreachable:
@@ -921,6 +930,12 @@ class MacApi:
         _ = self.ax_set(window.ax, self.hiservices.kAXMainAttribute, value=True)
         _ = self.ax_set(window.ax, self.hiservices.kAXFocusedAttribute, value=True)
         _ = self.ax_action(window.ax, self.hiservices.kAXRaiseAction)
+
+    def close_window(self, window: WindowInfo) -> bool:
+        button = self.ax_get(window.ax, self.hiservices.kAXCloseButtonAttribute)
+        if button is None:
+            return False
+        return self.ax_action(button, self.hiservices.kAXPressAction)
 
     def screens(self) -> tuple[ScreenInfo, ...]:
         screens = tuple(cast(Iterable[DynamicObjC], self.appkit.NSScreen.screens()))
@@ -1467,6 +1482,8 @@ class WindowDaemon:
                     return self.move(direction=direction)
                 case "fullscreen":
                     return self.toggle_fullscreen()
+                case "close":
+                    return self.close_focused_window()
                 case "columns":
                     if request.columns is None:
                         msg = "columns command requires a column count"
@@ -1699,6 +1716,14 @@ class WindowDaemon:
         if fresh is not None:
             self.api.focus_window(fresh)
         return "fullscreen on"
+
+    def close_focused_window(self) -> str:
+        focused = self.api.focused_window()
+        if focused is None:
+            return "no focused window"
+        if self.api.close_window(focused):
+            return f"closed {focused.title or focused.key}"
+        return "focused window cannot be closed"
 
     def _fresh_window_for_key(self, key: str) -> WindowInfo | None:
         return next(
@@ -2035,6 +2060,7 @@ class _MemoryApi:
     objc: object | None = None
     frames: dict[str, Rect] = field(default_factory=dict)
     focused_history: list[str] = field(default_factory=list)
+    closed_history: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.hiservices is None:
@@ -2059,6 +2085,10 @@ class _MemoryApi:
     def focus_window(self, window: WindowInfo) -> None:
         self.focused_key = window.key
         self.focused_history.append(window.key)
+
+    def close_window(self, window: WindowInfo) -> bool:
+        self.closed_history.append(window.key)
+        return True
 
 
 class _MemoryHiservices:
@@ -2264,6 +2294,8 @@ ValueError: unknown direction: north
 'h'
 >>> KeyChord.parse("alt-h").matches(key="h", modifiers={"alt"})
 True
+>>> parse_binding_command("close")
+IpcRequest(kind='close', direction=None, columns=None)
 """,
     "daemon_with_memory_api": """
 >>> daemon, api = _Test.daemon()
@@ -2294,6 +2326,10 @@ True
 'moved right'
 >>> daemon.state.columns_by_screen["s"]
 [['a', 'c', 'd'], ['b']]
+>>> daemon.handle(IpcRequest(kind="close"))
+'closed b'
+>>> api.closed_history
+['b']
 """,
 }
 
@@ -2369,6 +2405,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--socket", type=Path, default=None, dest="socket_path"
     )
 
+    close_parser = subparsers.add_parser("close")
+    close_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+
     columns_parser = subparsers.add_parser("columns")
     columns_parser.add_argument("number_of_columns", type=float)
     columns_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
@@ -2413,7 +2452,7 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
                 direction=parse_direction(direction),
             )
             return ClientArgs(request=request, socket_path=socket_path)
-        case "fullscreen" | "retile" | "status" | "stop":
+        case "fullscreen" | "close" | "retile" | "status" | "stop":
             socket_path = cast(Path | None, args.socket_path)
             request = IpcRequest(kind=cast(CommandKind, command))
             return ClientArgs(request=request, socket_path=socket_path)
