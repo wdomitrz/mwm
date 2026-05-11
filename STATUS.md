@@ -8,7 +8,26 @@ Verification:
 make
 ```
 
-Last result: passes locally on Linux without PyObjC installed, including 87
-doctests for layout geometry, state movement, IPC parsing, and daemon dispatch
-with an in-memory API. Runtime macOS API paths are lazy-loaded and still need to
-be exercised on macOS with Accessibility permission granted.
+Last result: passes locally with:
+
+```sh
+make lint
+make test
+```
+
+Coverage is primarily doctests for geometry, layout state, focus selection, IPC
+parsing, keybinding parsing, and daemon dispatch with an in-memory API.
+
+Current runtime behavior:
+
+- `./m3.py daemon` starts the macOS tiling daemon with built-in keybindings.
+- `./m3.py daemon --no-keybindings` starts without keybindings.
+- `./m3.py daemon --keybindings PATH` loads a simple JSON map from key chord to
+  command.
+- Keybindings use physical key codes where possible, so Option-modified
+  characters still match bindings such as `alt-h`.
+- `shift-alt-q` closes the currently focused window by pressing its AX close
+  button.
+
+Runtime macOS Accessibility paths still need live validation after each
+behavioral change, because doctests use an in-memory API.

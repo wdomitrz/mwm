@@ -1,8 +1,9 @@
 # m3
 
-`m3.py` is a small macOS tiling daemon controlled through a Unix socket. It uses
-PyObjC for Accessibility, CoreFoundation, AppKit, and Quartz access, while key
-bindings are expected to be handled elsewhere, for example by `skhd`.
+`m3.py` is a small macOS tiling daemon. It uses PyObjC for Accessibility,
+CoreFoundation, AppKit, and Quartz access, and includes simple built-in
+keybindings through `pynput`. The daemon is also controlled through a Unix socket,
+so commands can still be sent from scripts or another hotkey daemon.
 
 Start the daemon:
 
@@ -10,8 +11,7 @@ Start the daemon:
 ./m3.py daemon --columns 2.5
 ```
 
-The daemon starts with built-in keybindings matching `skhdrc.sample`. To run
-without keybindings:
+The daemon starts with built-in keybindings. To run without keybindings:
 
 ```sh
 ./m3.py daemon --no-keybindings
@@ -20,12 +20,63 @@ without keybindings:
 To use a simple JSON keybinding file:
 
 ```sh
-./m3.py daemon --keybindings keybindings.sample.json
+./m3.py daemon --keybindings ~/.config/m3/keybindings.json
 ```
 
 On macOS, keybindings are matched by physical key code where possible, so
 `alt-h` still means the `h` key even if Option would normally type a different
 character.
+
+Default keybindings:
+
+```text
+alt-h          focus left
+alt-j          focus down
+alt-k          focus up
+alt-l          focus right
+
+shift-alt-h    move left
+shift-alt-j    move down
+shift-alt-k    move up
+shift-alt-l    move right
+shift-alt-q    close focused window
+
+alt-f          fullscreen
+alt-r          retile
+
+ctrl-alt-1     columns 1
+ctrl-alt-2     columns 2
+ctrl-alt-3     columns 3
+ctrl-alt-4     columns 2.5
+ctrl-alt-5     columns 1.7
+
+ctrl-alt-s     status
+```
+
+Keybinding JSON is a simple object mapping a key chord to an `m3` command. This
+example matches the built-in defaults:
+
+```json
+{
+  "alt-h": "focus left",
+  "alt-j": "focus down",
+  "alt-k": "focus up",
+  "alt-l": "focus right",
+  "shift-alt-h": "move left",
+  "shift-alt-j": "move down",
+  "shift-alt-k": "move up",
+  "shift-alt-l": "move right",
+  "shift-alt-q": "close",
+  "alt-f": "fullscreen",
+  "alt-r": "retile",
+  "ctrl-alt-1": "columns 1",
+  "ctrl-alt-2": "columns 2",
+  "ctrl-alt-3": "columns 3",
+  "ctrl-alt-4": "columns 2.5",
+  "ctrl-alt-5": "columns 1.7",
+  "ctrl-alt-s": "status"
+}
+```
 
 Useful client commands:
 
@@ -34,6 +85,7 @@ Useful client commands:
 ./m3.py focus right
 ./m3.py move left
 ./m3.py move right
+./m3.py close
 ./m3.py fullscreen
 ./m3.py columns 3
 ./m3.py retile
