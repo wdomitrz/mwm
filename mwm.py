@@ -37,12 +37,21 @@ from typing import ClassVar, Literal, Protocol, assert_never, cast
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
 CommandKind = Literal[
-    "focus", "move", "fullscreen", "close", "columns", "retile", "status", "stop"
+    "focus",
+    "move",
+    "goto-desktop",
+    "fullscreen",
+    "close",
+    "columns",
+    "retile",
+    "status",
+    "stop",
 ]
 CliCommand = Literal[
     "daemon",
     "focus",
     "move",
+    "goto-desktop",
     "fullscreen",
     "close",
     "columns",
@@ -55,6 +64,19 @@ JsonObject = dict[str, object]
 PAIR_LENGTH: int = 2
 COMMAND_WITH_ARG_LENGTH: int = 2
 COMMAND_WITHOUT_ARG_LENGTH: int = 1
+DESKTOP_COUNT: int = 10
+DESKTOP_KEY_CODES: dict[int, int] = {
+    1: 0x12,
+    2: 0x13,
+    3: 0x14,
+    4: 0x15,
+    5: 0x17,
+    6: 0x16,
+    7: 0x1A,
+    8: 0x1C,
+    9: 0x19,
+    10: 0x1D,
+}
 FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
 CLIENT_COMMANDS_WITHOUT_ARGS: tuple[
     Literal["fullscreen", "close", "retile", "status", "stop"], ...
@@ -67,6 +89,7 @@ UTILITY_COMMANDS: tuple[Literal["retile", "status", "stop"], ...] = (
 COMMAND_KINDS: tuple[CommandKind, ...] = (
     "focus",
     "move",
+    "goto-desktop",
     "fullscreen",
     "close",
     "columns",
@@ -457,6 +480,7 @@ class LayoutConfig:
 class IpcRequest:
     kind: CommandKind
     direction: Direction | None = None
+    desktop: int | None = None
     columns: float | None = None
 
     @classmethod
@@ -469,12 +493,27 @@ class IpcRequest:
             if raw.get("direction") is not None
             else None
         )
+        desktop = (
+            parse_desktop_number(raw["desktop"])
+            if raw.get("desktop") is not None
+            else None
+        )
         columns = to_float(raw["columns"]) if raw.get("columns") is not None else None
-        return cls(kind=kind, direction=direction, columns=columns)
+        return cls(
+            kind=kind,
+            direction=direction,
+            desktop=desktop,
+            columns=columns,
+        )
 
     def to_json(self) -> bytes:
         return json.dumps(
-            {"kind": self.kind, "direction": self.direction, "columns": self.columns},
+            {
+                "kind": self.kind,
+                "direction": self.direction,
+                "desktop": self.desktop,
+                "columns": self.columns,
+            },
             separators=(",", ":"),
         ).encode()
 
@@ -666,6 +705,16 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
             "shift-alt-j": "move down",
             "shift-alt-k": "move up",
             "shift-alt-l": "move right",
+            "alt-1": "goto-desktop 1",
+            "alt-2": "goto-desktop 2",
+            "alt-3": "goto-desktop 3",
+            "alt-4": "goto-desktop 4",
+            "alt-5": "goto-desktop 5",
+            "alt-6": "goto-desktop 6",
+            "alt-7": "goto-desktop 7",
+            "alt-8": "goto-desktop 8",
+            "alt-9": "goto-desktop 9",
+            "alt-0": "goto-desktop 10",
             "shift-alt-q": "close",
             "alt-f": "fullscreen",
             "alt-r": "retile",
@@ -694,7 +743,7 @@ def parse_keybinding_map(raw: Mapping[str, object]) -> tuple[KeyBinding, ...]:
     """Parse a simple chord-to-command JSON object.
 
     >>> [binding.request for binding in parse_keybinding_map({"alt-h": "focus left", "alt-f": "fullscreen"})]
-    [IpcRequest(kind='focus', direction='left', columns=None), IpcRequest(kind='fullscreen', direction=None, columns=None)]
+    [IpcRequest(kind='focus', direction='left', desktop=None, columns=None), IpcRequest(kind='fullscreen', direction=None, desktop=None, columns=None)]
     """
     return tuple(
         KeyBinding(
@@ -709,9 +758,11 @@ def parse_binding_command(command: str) -> IpcRequest:
     """Parse the command side of a keybinding.
 
     >>> parse_binding_command("move left")
-    IpcRequest(kind='move', direction='left', columns=None)
+    IpcRequest(kind='move', direction='left', desktop=None, columns=None)
+    >>> parse_binding_command("goto-desktop 2")
+    IpcRequest(kind='goto-desktop', direction=None, desktop=2, columns=None)
     >>> parse_binding_command("columns 1.7")
-    IpcRequest(kind='columns', direction=None, columns=1.7)
+    IpcRequest(kind='columns', direction=None, desktop=None, columns=1.7)
     """
     parts = shlex.split(command)
     assert parts
@@ -720,6 +771,9 @@ def parse_binding_command(command: str) -> IpcRequest:
         case "focus" | "move":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
             return IpcRequest(kind=kind, direction=parse_direction(parts[1]))
+        case "goto-desktop":
+            assert len(parts) == COMMAND_WITH_ARG_LENGTH
+            return IpcRequest(kind=kind, desktop=parse_desktop_number(parts[1]))
         case "columns":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
             return IpcRequest(kind=kind, columns=float(parts[1]))
@@ -937,6 +991,18 @@ class MacApi:
             return False
         return self.ax_action(button, self.hiservices.kAXPressAction)
 
+    def switch_desktop(self, number: int) -> bool:
+        key_code = DESKTOP_KEY_CODES.get(number)
+        if key_code is None:
+            return False
+        for is_down in (True, False):
+            event = self.quartz.CGEventCreateKeyboardEvent(None, key_code, is_down)
+            if event is None:
+                return False
+            self.quartz.CGEventSetFlags(event, self.quartz.kCGEventFlagMaskControl)
+            self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, event)
+        return True
+
     def screens(self) -> tuple[ScreenInfo, ...]:
         screens = tuple(cast(Iterable[DynamicObjC], self.appkit.NSScreen.screens()))
         if not screens:
@@ -953,9 +1019,9 @@ class MacApi:
         return tuple(result)
 
     def running_pids(self) -> tuple[int, ...]:
-        workspace = self.appkit.NSWorkspace.sharedWorkspace()
+        desktop = self.appkit.NSWorkspace.sharedWorkspace()
         pids: list[int] = []
-        for app in cast(Iterable[DynamicObjC], workspace.runningApplications()):
+        for app in cast(Iterable[DynamicObjC], desktop.runningApplications()):
             pid = int(app.processIdentifier())
             if pid > 0 and pid != os.getpid():
                 pids.append(pid)
@@ -1480,6 +1546,9 @@ class WindowDaemon:
                 case "move":
                     direction = require_direction(request)
                     return self.move(direction=direction)
+                case "goto-desktop":
+                    desktop = require_desktop(request)
+                    return self.switch_desktop(number=desktop)
                 case "fullscreen":
                     return self.toggle_fullscreen()
                 case "close":
@@ -1695,6 +1764,11 @@ class WindowDaemon:
         if fresh is not None:
             self.api.focus_window(fresh)
         return f"moved {direction}"
+
+    def switch_desktop(self, *, number: int) -> str:
+        if self.api.switch_desktop(number):
+            return f"posted desktop shortcut {number}"
+        return f"cannot post desktop shortcut {number}"
 
     def toggle_fullscreen(self) -> str:
         focused = self.api.focused_window()
@@ -2028,6 +2102,13 @@ def require_direction(request: IpcRequest) -> Direction:
     return request.direction
 
 
+def require_desktop(request: IpcRequest) -> int:
+    if request.desktop is None:
+        msg = f"{request.kind} command requires a desktop number"
+        raise ValueError(msg)
+    return request.desktop
+
+
 def parse_direction(value: str) -> Direction:
     match value:
         case "left" | "right" | "up" | "down":
@@ -2035,6 +2116,14 @@ def parse_direction(value: str) -> Direction:
         case _:
             msg = f"unknown direction: {value}"
             raise ValueError(msg)
+
+
+def parse_desktop_number(value: object) -> int:
+    number = to_int(value)
+    if 1 <= number <= DESKTOP_COUNT:
+        return number
+    msg = f"desktop number must be between 1 and {DESKTOP_COUNT}: {number}"
+    raise ValueError(msg)
 
 
 def parse_command_kind(value: str) -> CommandKind:
@@ -2295,7 +2384,7 @@ ValueError: unknown direction: north
 >>> KeyChord.parse("alt-h").matches(key="h", modifiers={"alt"})
 True
 >>> parse_binding_command("close")
-IpcRequest(kind='close', direction=None, columns=None)
+IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 """,
     "daemon_with_memory_api": """
 >>> daemon, api = _Test.daemon()
@@ -2418,6 +2507,10 @@ def build_parser() -> argparse.ArgumentParser:
     columns_parser.add_argument("number_of_columns", type=float)
     add_client_options(columns_parser)
 
+    goto_desktop_parser = subparsers.add_parser("goto-desktop")
+    goto_desktop_parser.add_argument("number", type=parse_desktop_number)
+    add_client_options(goto_desktop_parser)
+
     for command in UTILITY_COMMANDS:
         command_parser = subparsers.add_parser(command)
         add_client_options(command_parser)
@@ -2465,6 +2558,14 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             socket_path = cast(Path | None, args.socket_path)
             verbose = cast(bool, args.verbose)
             request = IpcRequest(kind=cast(CommandKind, command))
+            return ClientArgs(
+                request=request, socket_path=socket_path, verbose=verbose
+            )
+        case "goto-desktop":
+            desktop = cast(int, args.number)
+            socket_path = cast(Path | None, args.socket_path)
+            verbose = cast(bool, args.verbose)
+            request = IpcRequest(kind="goto-desktop", desktop=desktop)
             return ClientArgs(
                 request=request, socket_path=socket_path, verbose=verbose
             )

@@ -19,6 +19,7 @@ make uninstall
 ```text
 alt-h/j/k/l          focus left/down/up/right
 shift-alt-h/j/k/l    move left/down/up/right
+alt-1/2/3/.../0      switch to Desktop 1/2/3/.../10
 shift-alt-q          close focused window
 alt-f                fullscreen
 alt-r                retile
@@ -32,6 +33,7 @@ ctrl-alt-s           status
 ./mwm.py daemon
 ./mwm.py focus left
 ./mwm.py move right
+./mwm.py goto-desktop 2
 ./mwm.py close
 ./mwm.py fullscreen
 ./mwm.py columns 3

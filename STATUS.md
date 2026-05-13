@@ -28,6 +28,8 @@ Current runtime behavior:
   characters still match bindings such as `alt-h`.
 - `shift-alt-q` closes the currently focused window by pressing its AX close
   button.
+- `alt-1` through `alt-0` switches to Desktop 1 through 10.
+- `goto-desktop` posts macOS's `Control`+number Desktop shortcut.
 - Client commands are silent by default. Use `--verbose` to print daemon
   responses.
 - `make install` installs `mwm` into `~/.local/bin` and generates a LaunchAgent
