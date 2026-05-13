@@ -1537,9 +1537,7 @@ class WindowDaemon:
                 call = self.pending_ipc_calls.get_nowait()
             except queue.Empty:
                 return
-            call.respond(
-                self._handle_client_payload(call.payload, source=call.source)
-            )
+            call.respond(self._handle_client_payload(call.payload, source=call.source))
 
     def handle(self, request: IpcRequest) -> str:
         with self.lock:
@@ -2499,10 +2497,7 @@ def add_client_options(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="mwm.py",
-        description="Small macOS tiling daemon controlled through a Unix socket.",
-    )
+    parser = argparse.ArgumentParser(prog="mwm.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     daemon_parser = subparsers.add_parser("daemon")
