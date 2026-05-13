@@ -537,6 +537,7 @@ class AppObserver:
 @dataclass(kw_only=True)
 class PendingIpcCall:
     payload: bytes
+    source: str = "ipc"
     event: threading.Event = field(default_factory=threading.Event)
     response: IpcResponse | None = None
 
@@ -1360,9 +1361,11 @@ class WindowDaemon:
         config: LayoutConfig,
         api: MacApi,
         keybindings: tuple[KeyBinding, ...] | None = None,
+        verbose: bool = False,
     ) -> None:
         self.config = config
         self.api = api
+        self.verbose = verbose
         self.state = LayoutState()
         self.observers: dict[int, AppObserver] = {}
         self.observed_windows: set[str] = set()
@@ -1472,14 +1475,16 @@ class WindowDaemon:
     def _submit_ipc_call(self, payload: bytes) -> IpcResponse:
         if not self.running:
             return IpcResponse(ok=False, message="daemon is stopping")
-        call = PendingIpcCall(payload=payload)
+        call = PendingIpcCall(payload=payload, source="ipc")
         self.pending_ipc_calls.put(call)
         self._wake_run_loop()
         return call.wait(timeout=self.IPC_RESPONSE_TIMEOUT_SECONDS)
 
     def submit_keybinding(self, request: IpcRequest) -> None:
         if self.running:
-            self.pending_ipc_calls.put(PendingIpcCall(payload=request.to_json()))
+            self.pending_ipc_calls.put(
+                PendingIpcCall(payload=request.to_json(), source="keybinding")
+            )
             self._wake_run_loop()
 
     def _wake_run_loop(self) -> None:
@@ -1498,12 +1503,16 @@ class WindowDaemon:
                 break
         return b"".join(chunks).split(b"\n", maxsplit=1)[0]
 
-    def _handle_client_payload(self, payload: bytes) -> IpcResponse:
+    def _handle_client_payload(self, payload: bytes, *, source: str) -> IpcResponse:
         try:
             request = IpcRequest.from_json(payload)
             message = self.handle(request)
         except Exception as error:
+            if self.verbose:
+                print(f"{source}: invalid command -> {error}", flush=True)
             return IpcResponse(ok=False, message=str(error))
+        if self.verbose:
+            print(f"{source}: {request_summary(request)} -> {message}", flush=True)
         return IpcResponse(ok=True, message=message)
 
     def _tick(self, _timer: object, _info: object) -> None:
@@ -1528,7 +1537,9 @@ class WindowDaemon:
                 call = self.pending_ipc_calls.get_nowait()
             except queue.Empty:
                 return
-            call.respond(self._handle_client_payload(call.payload))
+            call.respond(
+                self._handle_client_payload(call.payload, source=call.source)
+            )
 
     def handle(self, request: IpcRequest) -> str:
         with self.lock:
@@ -2098,6 +2109,21 @@ def require_direction(request: IpcRequest) -> Direction:
     return request.direction
 
 
+def request_summary(request: IpcRequest) -> str:
+    match request.kind:
+        case "focus" | "move":
+            return f"{request.kind} {request.direction}"
+        case "goto-desktop":
+            return f"{request.kind} {request.desktop}"
+        case "columns":
+            columns = "?" if request.columns is None else f"{request.columns:g}"
+            return f"columns {columns}"
+        case "fullscreen" | "close" | "retile" | "status" | "stop":
+            return request.kind
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def require_desktop(request: IpcRequest) -> int:
     if request.desktop is None:
         msg = f"{request.kind} command requires a desktop number"
@@ -2439,7 +2465,12 @@ class DaemonArgs:
             if self.keybindings_enabled
             else None
         )
-        daemon = WindowDaemon(config=config, api=MacApi.load(), keybindings=keybindings)
+        daemon = WindowDaemon(
+            config=config,
+            api=MacApi.load(),
+            keybindings=keybindings,
+            verbose=self.verbose,
+        )
         return daemon.run()
 
 
