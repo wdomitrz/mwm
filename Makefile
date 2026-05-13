@@ -1,7 +1,5 @@
 PYTHON ?= python3
 UV_BIN ?= $(shell command -v uv)
-PYRIGHT ?= uv run --with basedpyright basedpyright
-PYRIGHT_FILES := mwm.py
 LAUNCHD_LABEL := local.mwm
 LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 LAUNCHD_DOMAIN := gui/$(shell id -u)
@@ -14,11 +12,11 @@ MWM_WORKDIR := $(HOME)
 all: fix lint test
 
 lint:
-	ruff check .
-	$(PYRIGHT) --project pyproject.toml --level error $(PYRIGHT_FILES)
+	ruff --config pyproject.toml check .
+	basedpyright --project pyproject.toml --level error .
 
 fix:
-	ruff check --extend-select I --fix-only --fix .
+	ruff --config pyproject.toml check --extend-select I --fix-only --fix .
 	ruff format .
 
 test:
