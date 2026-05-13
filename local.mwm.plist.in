@@ -8,13 +8,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>@UV_BIN@</string>
-    <string>run</string>
-    <string>--script</string>
     <string>@MWM_BIN@</string>
     <string>daemon</string>
-    <string>--columns</string>
-    <string>2.5</string>
   </array>
 
   <key>WorkingDirectory</key>
