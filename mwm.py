@@ -315,15 +315,13 @@ class Rect:
             sizes[index] += 1
         return tuple(sizes)
 
-    def split_columns(
-        self, *, count: int, columns: float, gap: int
-    ) -> tuple[Rect, ...]:
+    def split_columns(self, *, count: int, columns: float) -> tuple[Rect, ...]:
         """Return i3-like columns, including fractional final columns.
 
         >>> frame = Rect(x=0, y=0, width=1000, height=500)
-        >>> [rect.width for rect in frame.split_columns(count=3, columns=2.5, gap=0)]
+        >>> [rect.width for rect in frame.split_columns(count=3, columns=2.5)]
         [400, 400, 200]
-        >>> [rect.width for rect in frame.split_columns(count=2, columns=2.5, gap=0)]
+        >>> [rect.width for rect in frame.split_columns(count=2, columns=2.5)]
         [400, 600]
         """
         if count <= 0:
@@ -331,33 +329,31 @@ class Rect:
         if count == 1:
             return (self,)
 
-        available_width = max(0, self.width - gap * (count - 1))
         slot = 1.0 / columns
         weights = tuple([slot] * (count - 1) + [max(0.001, 1 - slot * (count - 1))])
-        widths = self._partition(available_width, weights)
+        widths = self._partition(self.width, weights)
         x = self.x
         rects: list[Rect] = []
         for width in widths:
             rects.append(Rect(x=x, y=self.y, width=width, height=self.height))
-            x += width + gap
+            x += width
         return tuple(rects)
 
     def split_rows(
-        self, *, count: int, gap: int, weights: tuple[float, ...] | None = None
+        self, *, count: int, weights: tuple[float, ...] | None = None
     ) -> tuple[Rect, ...]:
         if count <= 0:
             return ()
         if count == 1:
             return (self,)
 
-        available_height = max(0, self.height - gap * (count - 1))
         row_weights = usable_weights(weights=weights, count=count)
-        heights = self._partition(available_height, row_weights)
+        heights = self._partition(self.height, row_weights)
         y = self.y
         rects: list[Rect] = []
         for height in heights:
             rects.append(Rect(x=self.x, y=y, width=self.width, height=height))
-            y += height + gap
+            y += height
         return tuple(rects)
 
     def distance_to(self, other: Rect) -> float:
@@ -430,14 +426,13 @@ class VisibleWindowIndex:
 @dataclass(frozen=True, kw_only=True)
 class LayoutConfig:
     columns: float = 2.0
-    gap: int = 0
     poll_seconds: float = 1.0
     socket_path: Path = field(default_factory=default_socket_path)
 
     def __post_init__(self) -> None:
         """Validate user-controlled layout values.
 
-        >>> LayoutConfig(columns=2.5, gap=4, poll_seconds=0.25).max_column_count
+        >>> LayoutConfig(columns=2.5, poll_seconds=0.25).max_column_count
         3
         >>> LayoutConfig(columns=2.5).target_column_count(window_count=2)
         2
@@ -453,9 +448,6 @@ class LayoutConfig:
         if not math.isfinite(self.columns) or self.columns < 1:
             msg = "columns must be a finite number at least 1"
             raise ValueError(msg)
-        if self.gap < 0:
-            msg = "gap must not be negative"
-            raise ValueError(msg)
         if not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0:
             msg = "poll_seconds must be a finite positive number"
             raise ValueError(msg)
@@ -463,7 +455,6 @@ class LayoutConfig:
     def with_columns(self, columns: float) -> LayoutConfig:
         return LayoutConfig(
             columns=columns,
-            gap=self.gap,
             poll_seconds=self.poll_seconds,
             socket_path=self.socket_path,
         )
@@ -861,9 +852,7 @@ class KeyBindingManager:
         if repeated:
             return False
         for binding in self.bindings:
-            if binding.chord.matches(
-                key=key_name, modifiers=self.pressed_modifiers
-            ):
+            if binding.chord.matches(key=key_name, modifiers=self.pressed_modifiers):
                 self.submit(binding.request)
                 return True
         return False
@@ -931,7 +920,9 @@ class MacApi:
             return None
         return to_int(result.value)
 
-    def ax_bool(self, element: object, attribute: object, *, default: bool = False) -> bool:
+    def ax_bool(
+        self, element: object, attribute: object, *, default: bool = False
+    ) -> bool:
         value = self.ax_get(element, attribute)
         if value is None:
             return default
@@ -1056,7 +1047,9 @@ class MacApi:
                 order_by_pid_number[(pid, number)] = order
                 bounds = raw.get(self.quartz.kCGWindowBounds)
                 if isinstance(bounds, Mapping):
-                    frame = Rect.from_quartz_bounds(cast(Mapping[object, object], bounds))
+                    frame = Rect.from_quartz_bounds(
+                        cast(Mapping[object, object], bounds)
+                    )
                     if frame is not None:
                         frames_by_pid.setdefault(pid, []).append((order, frame))
         return VisibleWindowIndex(
@@ -1628,7 +1621,9 @@ class WindowDaemon:
             )
         self.observed_windows.add(window.key)
 
-    def _add_notification(self, *, pid: int, element: object, notification: object) -> None:
+    def _add_notification(
+        self, *, pid: int, element: object, notification: object
+    ) -> None:
         observer = self.observers.get(pid)
         if observer is None:
             return
@@ -1854,7 +1849,9 @@ def window_sort_key(window: WindowInfo) -> tuple[str, int, int, str]:
     return (window.screen_key, window.pid, window.order, window.key)
 
 
-def usable_weights(*, weights: tuple[float, ...] | None, count: int) -> tuple[float, ...]:
+def usable_weights(
+    *, weights: tuple[float, ...] | None, count: int
+) -> tuple[float, ...]:
     """Return positive finite row weights or an equal split fallback.
 
     >>> usable_weights(weights=(3, 1), count=2)
@@ -1908,7 +1905,7 @@ def layout_targets(
     [('a', 250), ('b', 167), ('c', 83)]
     """
     column_frames = screen.frame.split_columns(
-        count=len(columns), columns=config.columns, gap=config.gap
+        count=len(columns), columns=config.columns
     )
     return {
         key: frame
@@ -1917,7 +1914,6 @@ def layout_targets(
             column,
             column_frame.split_rows(
                 count=len(column),
-                gap=config.gap,
                 weights=column_row_weights(
                     column=column, row_weights_by_key=row_weights_by_key or {}
                 ),
@@ -2272,8 +2268,8 @@ True
 100
 >>> rect.distance_to(Rect(x=40, y=20, width=30, height=40))
 30.0
->>> [row.as_key() for row in Rect(x=0, y=0, width=10, height=10).split_rows(count=3, gap=1)]
-['0,0,10,3', '0,4,10,3', '0,8,10,2']
+>>> [row.as_key() for row in Rect(x=0, y=0, width=10, height=10).split_rows(count=3)]
+['0,0,10,4', '0,4,10,3', '0,7,10,3']
 """,
     "visible_window_index": """
 >>> index = VisibleWindowIndex(
@@ -2426,7 +2422,6 @@ IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 @dataclass(frozen=True, kw_only=True)
 class DaemonArgs:
     columns: float
-    gap: int
     poll_seconds: float
     socket_path: Path | None
     keybindings_enabled: bool
@@ -2436,12 +2431,13 @@ class DaemonArgs:
     def main(self) -> int:
         config = LayoutConfig(
             columns=self.columns,
-            gap=self.gap,
             poll_seconds=self.poll_seconds,
             socket_path=self.socket_path or Ipc.default_socket_path(),
         )
         keybindings = (
-            load_keybindings(self.keybindings_path) if self.keybindings_enabled else None
+            load_keybindings(self.keybindings_path)
+            if self.keybindings_enabled
+            else None
         )
         daemon = WindowDaemon(config=config, api=MacApi.load(), keybindings=keybindings)
         return daemon.run()
@@ -2480,7 +2476,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser("daemon")
     daemon_parser.add_argument("--columns", "-c", type=float, default=2.0)
-    daemon_parser.add_argument("--gap", "-g", type=int, default=0)
     daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
     daemon_parser.add_argument("--keybindings", type=Path, default=None)
@@ -2528,7 +2523,6 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
     match command:
         case "daemon":
             columns = cast(float, args.columns)
-            gap = cast(int, args.gap)
             poll_seconds = cast(float, args.poll_seconds)
             socket_path = cast(Path | None, args.socket_path)
             keybindings_enabled = cast(bool, args.keybindings_enabled)
@@ -2536,7 +2530,6 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             verbose = cast(bool, args.verbose)
             return DaemonArgs(
                 columns=columns,
-                gap=gap,
                 poll_seconds=poll_seconds,
                 socket_path=socket_path,
                 keybindings_enabled=keybindings_enabled,
@@ -2551,32 +2544,24 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
                 kind=cast(CommandKind, command),
                 direction=parse_direction(direction),
             )
-            return ClientArgs(
-                request=request, socket_path=socket_path, verbose=verbose
-            )
+            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             socket_path = cast(Path | None, args.socket_path)
             verbose = cast(bool, args.verbose)
             request = IpcRequest(kind=cast(CommandKind, command))
-            return ClientArgs(
-                request=request, socket_path=socket_path, verbose=verbose
-            )
+            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
         case "goto-desktop":
             desktop = cast(int, args.number)
             socket_path = cast(Path | None, args.socket_path)
             verbose = cast(bool, args.verbose)
             request = IpcRequest(kind="goto-desktop", desktop=desktop)
-            return ClientArgs(
-                request=request, socket_path=socket_path, verbose=verbose
-            )
+            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
         case "columns":
             columns = cast(float, args.number_of_columns)
             socket_path = cast(Path | None, args.socket_path)
             verbose = cast(bool, args.verbose)
             request = IpcRequest(kind="columns", columns=columns)
-            return ClientArgs(
-                request=request, socket_path=socket_path, verbose=verbose
-            )
+            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
         case _ as unreachable:
             assert_never(unreachable)
 
