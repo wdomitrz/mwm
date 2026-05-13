@@ -8,6 +8,8 @@
 
   <key>ProgramArguments</key>
   <array>
+    <string>@UV@</string>
+    <string>run</string>
     <string>@MWM_BIN@</string>
     <string>daemon</string>
   </array>
