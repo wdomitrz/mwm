@@ -24,6 +24,8 @@ Current runtime behavior:
 - `./mwm.py daemon --no-keybindings` starts without keybindings.
 - `./mwm.py daemon --keybindings PATH` loads a simple JSON map from key chord to
   command.
+- The periodic repair poll defaults to 30 seconds; use
+  `./mwm.py daemon --no-poll` to rely only on AX notifications and manual retile.
 - Keybindings use physical key codes where possible, so Option-modified
   characters still match bindings such as `alt-h`.
 - `shift-alt-q` closes the currently focused window by pressing its AX close

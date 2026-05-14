@@ -31,6 +31,8 @@ ctrl-alt-s           status
 
 ```sh
 ./mwm.py daemon
+./mwm.py daemon --poll-seconds 30
+./mwm.py daemon --no-poll
 ./mwm.py focus left
 ./mwm.py move right
 ./mwm.py goto-desktop 2

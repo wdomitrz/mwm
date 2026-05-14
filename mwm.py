@@ -426,7 +426,7 @@ class VisibleWindowIndex:
 @dataclass(frozen=True, kw_only=True)
 class LayoutConfig:
     columns: float = 2.0
-    poll_seconds: float = 1.0
+    poll_seconds: float | Literal["disabled"] = 30.0
     socket_path: Path = field(default_factory=default_socket_path)
 
     def __post_init__(self) -> None:
@@ -434,6 +434,8 @@ class LayoutConfig:
 
         >>> LayoutConfig(columns=2.5, poll_seconds=0.25).max_column_count
         3
+        >>> LayoutConfig(poll_seconds="disabled").poll_seconds
+        'disabled'
         >>> LayoutConfig(columns=2.5).target_column_count(window_count=2)
         2
         >>> LayoutConfig(columns=float("nan"))
@@ -448,7 +450,9 @@ class LayoutConfig:
         if not math.isfinite(self.columns) or self.columns < 1:
             msg = "columns must be a finite number at least 1"
             raise ValueError(msg)
-        if not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0:
+        if self.poll_seconds != "disabled" and (
+            not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0
+        ):
             msg = "poll_seconds must be a finite positive number"
             raise ValueError(msg)
 
@@ -1380,7 +1384,7 @@ class WindowDaemon:
         self.running = False
         self.ipc_thread: threading.Thread | None = None
         self.tick_timer: object | None = None
-        self.next_periodic_at = 0.0
+        self.next_periodic_at: float | None = None
         self.retile_at: float | None = None
         self.capture_row_weights_at_retile = False
         self.ignore_events_until = 0.0
@@ -1404,7 +1408,8 @@ class WindowDaemon:
             self.keybinding_manager.start()
         self.refresh_observers()
         self.retile()
-        self.next_periodic_at = time.monotonic() + self.config.poll_seconds
+        if self.config.poll_seconds != "disabled":
+            self.next_periodic_at = time.monotonic() + self.config.poll_seconds
         self._install_tick_timer()
         self.api.core.CFRunLoopRun()
         self.running = False
@@ -1521,10 +1526,13 @@ class WindowDaemon:
             if not self.running:
                 return
             now = time.monotonic()
-            if now >= self.next_periodic_at:
+            if self.next_periodic_at is not None and now >= self.next_periodic_at:
                 self.refresh_observers()
                 self.retile()
-                self.next_periodic_at = now + self.config.poll_seconds
+                poll_seconds = self.config.poll_seconds
+                self.next_periodic_at = (
+                    None if poll_seconds == "disabled" else now + poll_seconds
+                )
                 self.retile_at = None
                 return
             if self.retile_at is not None and now >= self.retile_at:
@@ -1575,7 +1583,12 @@ class WindowDaemon:
 
     def status(self) -> str:
         windows = self.api.collect_windows()
-        return f"running: columns={self.config.columns:g}, windows={len(windows)}, socket={self.config.socket_path}"
+        poll = (
+            "disabled"
+            if self.config.poll_seconds == "disabled"
+            else f"{self.config.poll_seconds:g}s"
+        )
+        return f"running: columns={self.config.columns:g}, poll={poll}, windows={len(windows)}, socket={self.config.socket_path}"
 
     def refresh_observers(self) -> None:
         with self.lock:
@@ -2405,6 +2418,12 @@ ValueError: unknown direction: north
 True
 >>> parse_binding_command("close")
 IpcRequest(kind='close', direction=None, desktop=None, columns=None)
+>>> parse_cli_args(["daemon"]).poll_seconds
+30.0
+>>> parse_cli_args(["daemon", "--no-poll"]).poll_seconds
+'disabled'
+>>> parse_cli_args(["daemon", "--poll-seconds", "5"]).poll_seconds
+5.0
 """,
     "daemon_with_memory_api": """
 >>> daemon, api = _Test.daemon()
@@ -2446,7 +2465,7 @@ IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 @dataclass(frozen=True, kw_only=True)
 class DaemonArgs:
     columns: float
-    poll_seconds: float
+    poll_seconds: float | Literal["disabled"]
     socket_path: Path | None
     keybindings_enabled: bool
     keybindings_path: Path | None
@@ -2502,7 +2521,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser("daemon")
     daemon_parser.add_argument("--columns", "-c", type=float, default=2.0)
-    daemon_parser.add_argument("--poll-seconds", type=float, default=1.0)
+    daemon_parser.add_argument("--poll-seconds", type=float, default=30.0)
+    daemon_parser.add_argument("--no-poll", action="store_true")
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
     daemon_parser.add_argument("--keybindings", type=Path, default=None)
     daemon_parser.add_argument("--verbose", "-v", action="store_true")
@@ -2549,7 +2569,10 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
     match command:
         case "daemon":
             columns = cast(float, args.columns)
-            poll_seconds = cast(float, args.poll_seconds)
+            no_poll = cast(bool, args.no_poll)
+            poll_seconds: float | Literal["disabled"] = (
+                "disabled" if no_poll else cast(float, args.poll_seconds)
+            )
             socket_path = cast(Path | None, args.socket_path)
             keybindings_enabled = cast(bool, args.keybindings_enabled)
             keybindings_path = cast(Path | None, args.keybindings)
