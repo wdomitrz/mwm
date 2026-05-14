@@ -426,7 +426,7 @@ class VisibleWindowIndex:
 @dataclass(frozen=True, kw_only=True)
 class LayoutConfig:
     columns: float = 2.0
-    poll_seconds: float | Literal["disabled"] = 30.0
+    poll_seconds: float | Literal["disabled"] = "disabled"
     socket_path: Path = field(default_factory=default_socket_path)
 
     def __post_init__(self) -> None:
@@ -434,6 +434,8 @@ class LayoutConfig:
 
         >>> LayoutConfig(columns=2.5, poll_seconds=0.25).max_column_count
         3
+        >>> LayoutConfig().poll_seconds
+        'disabled'
         >>> LayoutConfig(poll_seconds="disabled").poll_seconds
         'disabled'
         >>> LayoutConfig(columns=2.5).target_column_count(window_count=2)
@@ -2419,8 +2421,6 @@ True
 >>> parse_binding_command("close")
 IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 >>> parse_cli_args(["daemon"]).poll_seconds
-30.0
->>> parse_cli_args(["daemon", "--no-poll"]).poll_seconds
 'disabled'
 >>> parse_cli_args(["daemon", "--poll-seconds", "5"]).poll_seconds
 5.0
@@ -2521,8 +2521,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser("daemon")
     daemon_parser.add_argument("--columns", "-c", type=float, default=2.0)
-    daemon_parser.add_argument("--poll-seconds", type=float, default=30.0)
-    daemon_parser.add_argument("--no-poll", action="store_true")
+    daemon_parser.add_argument("--poll-seconds", type=float, default=None)
     daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
     daemon_parser.add_argument("--keybindings", type=Path, default=None)
     daemon_parser.add_argument("--verbose", "-v", action="store_true")
@@ -2569,9 +2568,9 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
     match command:
         case "daemon":
             columns = cast(float, args.columns)
-            no_poll = cast(bool, args.no_poll)
+            poll_seconds_arg = cast(float | None, args.poll_seconds)
             poll_seconds: float | Literal["disabled"] = (
-                "disabled" if no_poll else cast(float, args.poll_seconds)
+                "disabled" if poll_seconds_arg is None else poll_seconds_arg
             )
             socket_path = cast(Path | None, args.socket_path)
             keybindings_enabled = cast(bool, args.keybindings_enabled)
