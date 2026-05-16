@@ -70,12 +70,10 @@ CliCommand = Literal[
     "stop",
     "launchd-plist",
 ]
-JsonMap = dict[str, object]
 JsonObject = dict[str, object]
 PAIR_LENGTH: int = 2
 COMMAND_WITH_ARG_LENGTH: int = 2
 COMMAND_WITHOUT_ARG_LENGTH: int = 1
-DESKTOP_COUNT: int = 10
 LAUNCHD_LABEL = "mwm"
 LOCAL_BIN_NAME = ".local/bin/mwm.py"
 DESKTOP_KEY_CODES: dict[int, int] = {
@@ -148,11 +146,29 @@ class AxPoint:
     x: float
     y: float
 
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        if isinstance(raw, tuple):
+            x, y = cast(tuple[float, float], raw)
+            return cls(x=float(x), y=float(y))
+        else:
+            point = cast(CocoaPoint, raw)
+            return cls(x=float(point.x), y=float(point.y))
+
 
 @dataclass(frozen=True, kw_only=True)
 class AxSize:
     width: float
     height: float
+
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        if isinstance(raw, tuple):
+            width, height = cast(tuple[float, float], raw)
+            return cls(width=float(width), height=float(height))
+        else:
+            size = cast(CocoaSize, raw)
+            return cls(width=float(size.width), height=float(size.height))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -160,59 +176,21 @@ class AxCopyValue:
     error: object
     value: object
 
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        error, value = cast(tuple[object, object], raw)
+        return cls(error=error, value=value)
+
 
 @dataclass(frozen=True, kw_only=True)
 class AxValue:
     ok: bool
     value: object
 
-
-def to_float(value: object) -> float:
-    return float(cast(str | bytes | int | float, value))
-
-
-def to_int(value: object) -> int:
-    return int(cast(str | bytes | int | float, value))
-
-
-def parse_json_map(payload: bytes) -> JsonMap:
-    raw = cast(object, json.loads(payload.decode()))
-    assert isinstance(raw, dict)
-    return cast(JsonMap, raw)
-
-
-def parse_pair(raw: object) -> tuple[object, object]:
-    pair = cast(tuple[object, ...], raw) if isinstance(raw, tuple) else None
-    assert pair is not None
-    assert len(pair) == PAIR_LENGTH
-    first, second = pair
-    return (first, second)
-
-
-def parse_ax_copy_value(raw: object) -> AxCopyValue:
-    error, value = parse_pair(raw)
-    return AxCopyValue(error=error, value=value)
-
-
-def parse_ax_value(raw: object) -> AxValue:
-    ok, value = parse_pair(raw)
-    return AxValue(ok=bool(ok), value=value)
-
-
-def parse_ax_point(raw: object) -> AxPoint:
-    if isinstance(raw, tuple):
-        x, y = parse_pair(cast(tuple[object, ...], raw))
-        return AxPoint(x=to_float(x), y=to_float(y))
-    point = cast(CocoaPoint, raw)
-    return AxPoint(x=float(point.x), y=float(point.y))
-
-
-def parse_ax_size(raw: object) -> AxSize:
-    if isinstance(raw, tuple):
-        width, height = parse_pair(cast(tuple[object, ...], raw))
-        return AxSize(width=to_float(width), height=to_float(height))
-    size = cast(CocoaSize, raw)
-    return AxSize(width=float(size.width), height=float(size.height))
+    @classmethod
+    def parse(cls, raw: object) -> AxValue:
+        ok, value = cast(tuple[object, object], raw)
+        return cls(ok=bool(ok), value=value)
 
 
 def default_socket_path() -> Path:
@@ -238,20 +216,38 @@ class Rect:
     width: int
     height: int
 
+    @dataclass(frozen=True, kw_only=True)
+    class FloatRect:
+        x: float
+        y: float
+        width: float
+        height: float
+
+    @classmethod
+    def rounded(cls, v: FloatRect) -> Self:
+        return cls(
+            x=round(v.x),
+            y=round(v.y),
+            width=round(v.width),
+            height=round(v.height),
+        )
+
     MIN_WIDTH: ClassVar[int] = 40
     MIN_HEIGHT: ClassVar[int] = 40
 
     @classmethod
     def from_ax_values(cls, *, position: AxPoint, size: AxSize) -> Rect:
-        return cls(
-            x=round(position.x),
-            y=round(position.y),
-            width=round(size.width),
-            height=round(size.height),
+        return cls.rounded(
+            cls.FloatRect(
+                x=position.x,
+                y=position.y,
+                width=size.width,
+                height=size.height,
+            )
         )
 
     @classmethod
-    def from_quartz_bounds(cls, raw: Mapping[object, object]) -> Rect | None:
+    def from_quartz_bounds(cls, raw: Mapping[str, object]) -> Rect | None:
         """Convert a CGWindow bounds dictionary into a rectangle.
 
         >>> Rect.from_quartz_bounds({"X": 1.2, "Y": 3.8, "Width": 10, "Height": 20})
@@ -259,12 +255,7 @@ class Rect:
         >>> Rect.from_quartz_bounds({"X": 1})
         """
         try:
-            return cls(
-                x=round(to_float(raw["X"])),
-                y=round(to_float(raw["Y"])),
-                width=round(to_float(raw["Width"])),
-                height=round(to_float(raw["Height"])),
-            )
+            return cls.rounded(cls.FloatRect(**{k.lower(): v for k, v in raw.items()}))  # pyright: ignore[reportArgumentType]
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -761,15 +752,15 @@ def parse_binding_command(command: str) -> IpcRequest:
     IpcRequest(kind='columns', direction=None, desktop=None, columns=1.7)
     """
     parts = shlex.split(command)
-    assert parts
-    kind = parse_command_kind(parts[0])
+    assert len(parts) > 0
+    kind = cast(CommandKind, parts[0])
     match kind:
         case "focus" | "move":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
-            return IpcRequest(kind=kind, direction=parse_direction(parts[1]))
+            return IpcRequest(kind=kind, direction=cast(Direction, parts[1]))
         case "goto-desktop":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
-            return IpcRequest(kind=kind, desktop=parse_desktop_number(parts[1]))
+            return IpcRequest(kind=kind, desktop=int(parts[1]))
         case "columns":
             assert len(parts) == COMMAND_WITH_ARG_LENGTH
             return IpcRequest(kind=kind, columns=float(parts[1]))
@@ -904,7 +895,7 @@ class MacApi:
         raise RuntimeError(msg)
 
     def ax_get(self, element: object, attribute: object) -> object | None:
-        result = parse_ax_copy_value(
+        result = AxCopyValue.parse(
             self.hiservices.AXUIElementCopyAttributeValue(element, attribute, None),
         )
         if result.error != self.hiservices.kAXErrorSuccess:
@@ -920,10 +911,11 @@ class MacApi:
         return error == self.hiservices.kAXErrorSuccess
 
     def ax_pid(self, element: object) -> int | None:
-        result = parse_ax_copy_value(self.hiservices.AXUIElementGetPid(element, None))
+        result = AxCopyValue.parse(self.hiservices.AXUIElementGetPid(element, None))
         if result.error != self.hiservices.kAXErrorSuccess:
             return None
-        return to_int(result.value)
+        else:
+            return int(result.value)
 
     def ax_bool(
         self, element: object, attribute: object, *, default: bool = False
@@ -931,27 +923,30 @@ class MacApi:
         value = self.ax_get(element, attribute)
         if value is None:
             return default
-        return bool(value)
+        else:
+            return bool(value)
 
     def ax_point(self, value: object) -> AxPoint | None:
-        result = parse_ax_value(
+        result = AxValue.parse(
             self.hiservices.AXValueGetValue(
                 value, self.hiservices.kAXValueTypeCGPoint, None
             ),
         )
         if not result.ok:
             return None
-        return parse_ax_point(result.value)
+        else:
+            return AxPoint.parse(result.value)
 
     def ax_size(self, value: object) -> AxSize | None:
-        result = parse_ax_value(
+        result = AxValue.parse(
             self.hiservices.AXValueGetValue(
                 value, self.hiservices.kAXValueTypeCGSize, None
             ),
         )
         if not result.ok:
             return None
-        return parse_ax_size(result.value)
+        else:
+            return AxSize.parse(result.value)
 
     def ax_frame(self, window: object) -> Rect | None:
         position_value = self.ax_get(window, self.hiservices.kAXPositionAttribute)
@@ -1054,15 +1049,15 @@ class MacApi:
         order_by_pid_number: dict[tuple[int, int], int] = {}
         frames_by_pid: dict[int, list[tuple[int, Rect]]] = {}
         for order, raw in enumerate(raw_windows):
-            if to_int(raw.get(self.quartz.kCGWindowLayer, 1)) != 0:
+            if int(raw.get(self.quartz.kCGWindowLayer, 1)) != 0:
                 continue
             if not bool(raw.get(self.quartz.kCGWindowIsOnscreen, False)):
                 continue
-            alpha = to_float(raw.get(self.quartz.kCGWindowAlpha, 1.0))
+            alpha = float(raw.get(self.quartz.kCGWindowAlpha, 1.0))
             if alpha <= 0:
                 continue
-            pid = to_int(raw.get(self.quartz.kCGWindowOwnerPID, 0))
-            number = to_int(raw.get(self.quartz.kCGWindowNumber, 0))
+            pid = int(raw.get(self.quartz.kCGWindowOwnerPID, 0))
+            number = int(raw.get(self.quartz.kCGWindowNumber, 0))
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
                 order_by_pid_number[(pid, number)] = order
@@ -1254,7 +1249,7 @@ class MacApi:
         if value is None:
             return None
         try:
-            return to_int(value)
+            return int(value)
         except (TypeError, ValueError):
             return None
 
@@ -1698,7 +1693,7 @@ class WindowDaemon:
 
     def _observe_app(self, *, pid: int) -> None:
         app = self.api.hiservices.AXUIElementCreateApplication(pid)
-        result = parse_ax_copy_value(
+        result = AxCopyValue.parse(
             self.api.hiservices.AXObserverCreate(pid, self.ax_callback, None)
         )
         if result.error != self.api.hiservices.kAXErrorSuccess:
@@ -2233,37 +2228,6 @@ def require_desktop(request: IpcRequest) -> int:
     return request.desktop
 
 
-def parse_direction(value: str) -> Direction:
-    match value:
-        case "left" | "right" | "up" | "down":
-            return value
-        case _:
-            msg = f"unknown direction: {value}"
-            raise ValueError(msg)
-
-
-def parse_desktop_number(value: object) -> int:
-    number = to_int(value)
-    if 1 <= number <= DESKTOP_COUNT:
-        return number
-    msg = f"desktop number must be between 1 and {DESKTOP_COUNT}: {number}"
-    raise ValueError(msg)
-
-
-def parse_command_kind(value: str) -> CommandKind:
-    if value in COMMAND_KINDS:
-        return value
-    msg = f"unknown command: {value}"
-    raise ValueError(msg)
-
-
-def parse_cli_command(value: str) -> CliCommand:
-    if value in CLI_COMMANDS:
-        return value
-    msg = f"unknown command: {value}"
-    raise ValueError(msg)
-
-
 @dataclass(kw_only=True)
 class _MemoryApi:
     windows: tuple[WindowInfo, ...]
@@ -2772,7 +2736,7 @@ class ClientArgs:
         cls.add_options(columns_parser)
 
         goto_desktop_parser = subparsers.add_parser("goto-desktop")
-        _ = goto_desktop_parser.add_argument("number", type=parse_desktop_number)
+        _ = goto_desktop_parser.add_argument("number", type=int)
         cls.add_options(goto_desktop_parser)
 
         for command in UTILITY_COMMANDS:
@@ -2788,7 +2752,7 @@ class ClientArgs:
                 return cls(
                     request=IpcRequest(
                         kind=command,
-                        direction=parse_direction(cast(str, args.direction)),
+                        direction=cast(Direction, args.direction),
                     ),
                     socket_path=socket_path,
                     verbose=verbose,
@@ -2969,7 +2933,7 @@ def parse_cli_args(argv: list[str] | None = None) -> ParsedCli:
 
 
 def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
-    command = parse_cli_command(cast(str, args.command))
+    command = cast(CliCommand, args.command)
     match command:
         case "daemon":
             return DaemonArgs.from_args(args)
