@@ -402,6 +402,24 @@ class IpcRequest:
     def dumps(self) -> str:
         return json.dumps(asdict(self))
 
+    def require_direction(self) -> Direction:
+        if self.direction is None:
+            msg = f"{self.kind} command requires a direction"
+            raise ValueError(msg)
+        return self.direction
+
+    def require_desktop(self) -> int:
+        if self.desktop is None:
+            msg = f"{self.kind} command requires a desktop number"
+            raise ValueError(msg)
+        return self.desktop
+
+    def require_columns(self) -> float:
+        if self.columns is None:
+            msg = "columns command requires a column count"
+            raise ValueError(msg)
+        return self.columns
+
 
 @dataclass(frozen=True, kw_only=True)
 class IpcResponse:
@@ -1000,22 +1018,25 @@ class MacOS:
         if app_pid is None:
             app_pid = front_pid
         windows = MacOS.collect_windows()
-        candidate_windows: list[AxElement | None] = [
-            MacOS.ax_get(system, HIServices.kAXFocusedWindowAttribute)
-        ]
+        candidate_windows: list[AxElement] = []
+        system_focused_window = MacOS.ax_get(
+            system, HIServices.kAXFocusedWindowAttribute
+        )
+        if system_focused_window is not None:
+            candidate_windows.append(system_focused_window)
         if focused_app is not None:
-            candidate_windows.extend(
-                (
-                    MacOS.ax_get(focused_app, HIServices.kAXFocusedWindowAttribute),
-                    MacOS.ax_get(focused_app, HIServices.kAXMainWindowAttribute),
-                )
+            focused_window = MacOS.ax_get(
+                focused_app, HIServices.kAXFocusedWindowAttribute
             )
+            if focused_window is not None:
+                candidate_windows.append(focused_window)
+            main_window = MacOS.ax_get(focused_app, HIServices.kAXMainWindowAttribute)
+            if main_window is not None:
+                candidate_windows.append(main_window)
             raw_windows = MacOS.ax_get(focused_app, HIServices.kAXWindowsAttribute)
             if raw_windows is not None:
                 candidate_windows.extend(cast(Iterable[AxElement], raw_windows))
         for window in candidate_windows:
-            if window is None:
-                continue
             info = MacOS._focused_window_info(window, app_pid=app_pid, windows=windows)
             if info is not None:
                 return info
@@ -1539,29 +1560,24 @@ class WindowDaemon:
         with self.lock:
             match request.kind:
                 case "focus":
-                    direction = require_direction(request)
-                    return self.focus(direction=direction)
+                    return self.focus(direction=request.require_direction())
                 case "move":
-                    direction = require_direction(request)
-                    return self.move(direction=direction)
+                    return self.move(direction=request.require_direction())
                 case "goto-desktop":
-                    desktop = require_desktop(request)
-                    return self.switch_desktop(number=desktop)
+                    return self.switch_desktop(number=request.require_desktop())
                 case "fullscreen":
                     return self.toggle_fullscreen()
                 case "close":
                     return self.close_focused_window()
                 case "columns":
-                    if request.columns is None:
-                        msg = "columns command requires a column count"
-                        raise ValueError(msg)
+                    columns = request.require_columns()
                     self.config = LayoutConfig(
-                        columns=request.columns,
+                        columns=columns,
                         poll_seconds=self.config.poll_seconds,
                         socket_path=self.config.socket_path,
                     )
                     self.retile()
-                    return f"columns set to {request.columns:g}"
+                    return f"columns set to {columns:g}"
                 case "retile":
                     self.retile()
                     return "retiled"
@@ -1729,7 +1745,10 @@ class WindowDaemon:
         windows = MacOS.collect_windows()
         arranged = self._arranged_windows(windows=windows)
         target = select_focus_target(
-            current=focused, direction=direction, arranged=arranged
+            current=focused,
+            direction=direction,
+            arranged=arranged,
+            fallback_candidates=windows,
         )
         if target is None:
             return "no target window"
@@ -1995,11 +2014,12 @@ def select_focus_target(
     current: WindowInfo,
     direction: Direction,
     arranged: dict[str, list[list[WindowInfo]]],
+    fallback_candidates: tuple[WindowInfo, ...],
 ) -> WindowInfo | None:
     columns = arranged.get(current.screen_key)
     if columns is None or len(columns) == 0:
         return geometric_focus_target(
-            current=current, direction=direction, candidates=()
+            current=current, direction=direction, candidates=fallback_candidates
         )
     for column_index, column in enumerate(columns):
         for row_index, window in enumerate(column):
@@ -2026,9 +2046,8 @@ def select_focus_target(
                     )
                 case _:
                     assert_never(direction)
-    candidates = tuple(window for column in columns for window in column)
     return geometric_focus_target(
-        current=current, direction=direction, candidates=candidates
+        current=current, direction=direction, candidates=fallback_candidates
     )
 
 
@@ -2082,33 +2101,18 @@ def geometric_focus_target(
     )
 
 
-def require_direction(request: IpcRequest) -> Direction:
-    if request.direction is None:
-        msg = f"{request.kind} command requires a direction"
-        raise ValueError(msg)
-    return request.direction
-
-
 def request_summary(request: IpcRequest) -> str:
     match request.kind:
         case "focus" | "move":
-            return f"{request.kind} {request.direction}"
+            return f"{request.kind} {request.require_direction()}"
         case "goto-desktop":
-            return f"{request.kind} {request.desktop}"
+            return f"{request.kind} {request.require_desktop()}"
         case "columns":
-            assert request.columns is not None
-            return f"columns {request.columns:g}"
+            return f"columns {request.require_columns():g}"
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             return request.kind
         case _:
             assert_never(request.kind)
-
-
-def require_desktop(request: IpcRequest) -> int:
-    if request.desktop is None:
-        msg = f"{request.kind} command requires a desktop number"
-        raise ValueError(msg)
-    return request.desktop
 
 
 @dataclass(frozen=True, kw_only=True)
