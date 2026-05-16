@@ -2971,7 +2971,6 @@ class LaunchdPlistArgs:
                 stderr_log=self.stderr_log,
             ),
             fmt=plistlib.FMT_XML,
-            sort_keys=False,
         )
         if self.output is None:
             _ = sys.stdout.buffer.write(payload)
