@@ -197,10 +197,10 @@ class Rect:
     def from_ax_values(cls, *, position: CocoaPoint, size: CocoaSize) -> Rect:
         return cls.rounded(
             cls.FloatRect(
-                x=float(position.x),
-                y=float(position.y),
-                width=float(size.width),
-                height=float(size.height),
+                x=position.x,
+                y=position.y,
+                width=size.width,
+                height=size.height,
             )
         )
 
