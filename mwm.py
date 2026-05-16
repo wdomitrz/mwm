@@ -65,6 +65,7 @@ CommandKind = Literal[
     "status",
     "stop",
 ]
+SimpleCommand = Literal["fullscreen", "close", "retile", "status", "stop"]
 CliCommand = Literal[
     "daemon",
     "focus",
@@ -80,6 +81,7 @@ CliCommand = Literal[
 ]
 NumberLike = str | bytes | int | float
 KeyBindingMap: TypeAlias = Mapping[str, str]
+RawIpcRequest: TypeAlias = Mapping[str, str | int | float]
 PlistScalar: TypeAlias = bool | int | float | str | bytes
 PlistValue: TypeAlias = PlistScalar | list["PlistValue"] | dict[str, "PlistValue"]
 Plist: TypeAlias = dict[str, PlistValue]
@@ -388,37 +390,62 @@ class LayoutConfig:
         return max(1, math.ceil(self.columns))
 
 
-@dataclass(kw_only=True, frozen=True)
-class IpcRequest:
-    kind: CommandKind
-    direction: Direction | None = None
-    desktop: int | None = None
-    columns: float | None = None
-
-    @classmethod
-    def loads(cls, data: str) -> Self:
-        return cls(**json.loads(data))  # pyright: ignore[reportAny]
-
+@dataclass(frozen=True, kw_only=True)
+class IpcRequestJson:
     def dumps(self) -> str:
         return json.dumps(asdict(self))
 
-    def require_direction(self) -> Direction:
-        if self.direction is None:
-            msg = f"{self.kind} command requires a direction"
-            raise ValueError(msg)
-        return self.direction
 
-    def require_desktop(self) -> int:
-        if self.desktop is None:
-            msg = f"{self.kind} command requires a desktop number"
-            raise ValueError(msg)
-        return self.desktop
+@dataclass(frozen=True, kw_only=True)
+class FocusRequest(IpcRequestJson):
+    direction: Direction
+    kind: Literal["focus"] = field(default="focus", init=False)
 
-    def require_columns(self) -> float:
-        if self.columns is None:
-            msg = "columns command requires a column count"
-            raise ValueError(msg)
-        return self.columns
+
+@dataclass(frozen=True, kw_only=True)
+class MoveRequest(IpcRequestJson):
+    direction: Direction
+    kind: Literal["move"] = field(default="move", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class GotoDesktopRequest(IpcRequestJson):
+    desktop: int
+    kind: Literal["goto-desktop"] = field(default="goto-desktop", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ColumnsRequest(IpcRequestJson):
+    columns: float
+    kind: Literal["columns"] = field(default="columns", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SimpleRequest(IpcRequestJson):
+    kind: SimpleCommand
+
+
+IpcRequest: TypeAlias = (
+    FocusRequest | MoveRequest | GotoDesktopRequest | ColumnsRequest | SimpleRequest
+)
+
+
+def load_ipc_request(data: str) -> IpcRequest:
+    raw = cast(RawIpcRequest, json.loads(data))
+    kind = cast(CommandKind, raw["kind"])
+    match kind:
+        case "focus":
+            return FocusRequest(direction=cast(Direction, raw["direction"]))
+        case "move":
+            return MoveRequest(direction=cast(Direction, raw["direction"]))
+        case "goto-desktop":
+            return GotoDesktopRequest(desktop=int(raw["desktop"]))
+        case "columns":
+            return ColumnsRequest(columns=float(raw["columns"]))
+        case "fullscreen" | "close" | "retile" | "status" | "stop":
+            return SimpleRequest(kind=kind)
+        case _:
+            assert_never(kind)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -637,7 +664,7 @@ def parse_keybinding_map(raw: KeyBindingMap) -> tuple[KeyBinding, ...]:
     """Parse a simple chord-to-command JSON object.
 
     >>> [binding.request for binding in parse_keybinding_map({"alt-h": "focus left", "alt-f": "fullscreen"})]
-    [IpcRequest(kind='focus', direction='left', desktop=None, columns=None), IpcRequest(kind='fullscreen', direction=None, desktop=None, columns=None)]
+    [FocusRequest(direction='left', kind='focus'), SimpleRequest(kind='fullscreen')]
     """
     return tuple(
         KeyBinding(
@@ -652,21 +679,23 @@ def parse_binding_command(command: str) -> IpcRequest:
     """Parse the command side of a keybinding.
 
     >>> parse_binding_command("move left")
-    IpcRequest(kind='move', direction='left', desktop=None, columns=None)
+    MoveRequest(direction='left', kind='move')
     >>> parse_binding_command("goto-desktop 2")
-    IpcRequest(kind='goto-desktop', direction=None, desktop=2, columns=None)
+    GotoDesktopRequest(desktop=2, kind='goto-desktop')
     >>> parse_binding_command("columns 1.7")
-    IpcRequest(kind='columns', direction=None, desktop=None, columns=1.7)
+    ColumnsRequest(columns=1.7, kind='columns')
     """
     match shlex.split(command):
-        case [("focus" | "move") as kind, direction]:
-            return IpcRequest(kind=kind, direction=cast(Direction, direction))
+        case ["focus", direction]:
+            return FocusRequest(direction=cast(Direction, direction))
+        case ["move", direction]:
+            return MoveRequest(direction=cast(Direction, direction))
         case ["goto-desktop", desktop]:
-            return IpcRequest(kind="goto-desktop", desktop=int(desktop))
+            return GotoDesktopRequest(desktop=int(desktop))
         case ["columns", columns]:
-            return IpcRequest(kind="columns", columns=float(columns))
+            return ColumnsRequest(columns=float(columns))
         case [("fullscreen" | "close" | "retile" | "status" | "stop") as kind]:
-            return IpcRequest(kind=kind)
+            return SimpleRequest(kind=kind)
         case _:
             msg = f"invalid keybinding command: {command}"
             raise ValueError(msg)
@@ -1441,7 +1470,7 @@ class WindowDaemon:
         socket_path = self.config.socket_path
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         if socket_path.exists():
-            stale = Ipc.send(path=socket_path, request=IpcRequest(kind="status"))
+            stale = Ipc.send(path=socket_path, request=SimpleRequest(kind="status"))
             if stale.ok:
                 msg = f"daemon already running at {socket_path}"
                 raise RuntimeError(msg)
@@ -1519,7 +1548,7 @@ class WindowDaemon:
 
     def _handle_client_payload(self, payload: str, *, source: str) -> IpcResponse:
         try:
-            request = IpcRequest.loads(payload)
+            request = load_ipc_request(payload)
             message = self.handle(request)
         except (AssertionError, KeyError, TypeError, ValueError) as error:
             if self.verbose:
@@ -1558,19 +1587,14 @@ class WindowDaemon:
 
     def handle(self, request: IpcRequest) -> str:
         with self.lock:
-            match request.kind:
-                case "focus":
-                    return self.focus(direction=request.require_direction())
-                case "move":
-                    return self.move(direction=request.require_direction())
-                case "goto-desktop":
-                    return self.switch_desktop(number=request.require_desktop())
-                case "fullscreen":
-                    return self.toggle_fullscreen()
-                case "close":
-                    return self.close_focused_window()
-                case "columns":
-                    columns = request.require_columns()
+            match request:
+                case FocusRequest(direction=direction):
+                    return self.focus(direction=direction)
+                case MoveRequest(direction=direction):
+                    return self.move(direction=direction)
+                case GotoDesktopRequest(desktop=desktop):
+                    return self.switch_desktop(number=desktop)
+                case ColumnsRequest(columns=columns):
                     self.config = LayoutConfig(
                         columns=columns,
                         poll_seconds=self.config.poll_seconds,
@@ -1578,16 +1602,24 @@ class WindowDaemon:
                     )
                     self.retile()
                     return f"columns set to {columns:g}"
-                case "retile":
-                    self.retile()
-                    return "retiled"
-                case "status":
-                    return self.status()
-                case "stop":
-                    self.stop()
-                    return "stopping"
+                case SimpleRequest(kind=kind):
+                    match kind:
+                        case "fullscreen":
+                            return self.toggle_fullscreen()
+                        case "close":
+                            return self.close_focused_window()
+                        case "retile":
+                            self.retile()
+                            return "retiled"
+                        case "status":
+                            return self.status()
+                        case "stop":
+                            self.stop()
+                            return "stopping"
+                        case _:
+                            assert_never(kind)
                 case _:
-                    assert_never(request.kind)
+                    assert_never(request)
 
     def status(self) -> str:
         windows = MacOS.collect_windows()
@@ -2102,17 +2134,19 @@ def geometric_focus_target(
 
 
 def request_summary(request: IpcRequest) -> str:
-    match request.kind:
-        case "focus" | "move":
-            return f"{request.kind} {request.require_direction()}"
-        case "goto-desktop":
-            return f"{request.kind} {request.require_desktop()}"
-        case "columns":
-            return f"columns {request.require_columns():g}"
-        case "fullscreen" | "close" | "retile" | "status" | "stop":
+    match request:
+        case FocusRequest(direction=direction):
+            return f"focus {direction}"
+        case MoveRequest(direction=direction):
+            return f"move {direction}"
+        case GotoDesktopRequest(desktop=desktop):
+            return f"{request.kind} {desktop}"
+        case ColumnsRequest(columns=columns):
+            return f"columns {columns:g}"
+        case SimpleRequest():
             return request.kind
         case _:
-            assert_never(request.kind)
+            assert_never(request)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -2214,36 +2248,33 @@ class ClientArgs:
         socket_path = cast(Path | None, args.socket_path)
         verbose = cast(bool, args.verbose)
         match command:
-            case "focus" | "move":
+            case "focus":
                 return cls(
-                    request=IpcRequest(
-                        kind=command,
-                        direction=cast(Direction, args.direction),
-                    ),
+                    request=FocusRequest(direction=cast(Direction, args.direction)),
+                    socket_path=socket_path,
+                    verbose=verbose,
+                )
+            case "move":
+                return cls(
+                    request=MoveRequest(direction=cast(Direction, args.direction)),
                     socket_path=socket_path,
                     verbose=verbose,
                 )
             case "fullscreen" | "close" | "retile" | "status" | "stop":
                 return cls(
-                    request=IpcRequest(kind=command),
+                    request=SimpleRequest(kind=command),
                     socket_path=socket_path,
                     verbose=verbose,
                 )
             case "goto-desktop":
                 return cls(
-                    request=IpcRequest(
-                        kind="goto-desktop",
-                        desktop=cast(int, args.number),
-                    ),
+                    request=GotoDesktopRequest(desktop=cast(int, args.number)),
                     socket_path=socket_path,
                     verbose=verbose,
                 )
             case "columns":
                 return cls(
-                    request=IpcRequest(
-                        kind="columns",
-                        columns=cast(float, args.number_of_columns),
-                    ),
+                    request=ColumnsRequest(columns=cast(float, args.number_of_columns)),
                     socket_path=socket_path,
                     verbose=verbose,
                 )
