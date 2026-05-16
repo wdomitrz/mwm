@@ -37,15 +37,12 @@ from pathlib import Path
 from types import FrameType
 from typing import (
     ClassVar,
-    Generic,
     Literal,
     Protocol,
     Self,
     TypeAlias,
-    TypeVar,
     assert_never,
     cast,
-    runtime_checkable,
 )
 
 import AppKit  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
@@ -86,8 +83,6 @@ KeyBindingMap: TypeAlias = Mapping[str, str]
 PlistScalar: TypeAlias = bool | int | float | str | bytes
 PlistValue: TypeAlias = PlistScalar | list["PlistValue"] | dict[str, "PlistValue"]
 Plist: TypeAlias = dict[str, PlistValue]
-COMMAND_WITH_ARG_LENGTH: int = 2
-COMMAND_WITHOUT_ARG_LENGTH: int = 1
 LAUNCHD_LABEL = "mwm"
 LOCAL_BIN_NAME = ".local/bin/mwm.py"
 DESKTOP_KEY_CODES: dict[int, int] = {
@@ -131,15 +126,10 @@ Quartz: DynamicObjC
 AxElement: TypeAlias = Hashable
 AxAttribute: TypeAlias = DynamicObjC | str
 AxAttributeValue: TypeAlias = None | bool | NumberLike | AxElement | DynamicObjC
-AxError: TypeAlias = AxAttributeValue
 AxCallback: TypeAlias = DynamicObjC
-AxNotification: TypeAlias = AxAttribute
 RunLoopHandle: TypeAlias = DynamicObjC
 TimerHandle: TypeAlias = DynamicObjC
-KeyboardEvent: TypeAlias = DynamicObjC
 KeyboardCallback: TypeAlias = Callable[[keyboard.Key | keyboard.KeyCode | None], None]
-ErrorT = TypeVar("ErrorT")
-ValueT = TypeVar("ValueT")
 
 
 class Subparsers(Protocol):
@@ -152,13 +142,11 @@ class KeyboardKey(Protocol):
     char: str | None
 
 
-@runtime_checkable
 class CocoaPoint(Protocol):
     x: float
     y: float
 
 
-@runtime_checkable
 class CocoaSize(Protocol):
     width: float
     height: float
@@ -171,56 +159,6 @@ class CocoaRect(Protocol):
 
 QuartzBounds: TypeAlias = Mapping[str, NumberLike]
 QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxAttributeValue | QuartzBounds]
-
-
-@dataclass(frozen=True, kw_only=True)
-class AxPoint:
-    x: float
-    y: float
-
-    @classmethod
-    def parse(cls, raw: CocoaPoint) -> Self:
-        match raw:
-            case CocoaPoint() as point:
-                return cls(x=float(point.x), y=float(point.y))
-            case _:
-                assert_never(raw)
-
-
-@dataclass(frozen=True, kw_only=True)
-class AxSize:
-    width: float
-    height: float
-
-    @classmethod
-    def parse(cls, raw: CocoaSize) -> Self:
-        match raw:
-            case CocoaSize() as size:
-                return cls(width=float(size.width), height=float(size.height))
-            case _:
-                assert_never(raw)
-
-
-@dataclass(frozen=True, kw_only=True)
-class AxCopyValue(Generic[ErrorT, ValueT]):
-    error: ErrorT
-    value: ValueT
-
-    @classmethod
-    def parse(cls, raw: tuple[ErrorT, ValueT]) -> Self:
-        error, value = raw
-        return cls(error=error, value=value)
-
-
-@dataclass(frozen=True, kw_only=True)
-class AxValue(Generic[ValueT]):
-    ok: bool
-    value: ValueT
-
-    @classmethod
-    def parse(cls, raw: tuple[bool, ValueT]) -> Self:
-        ok, value = raw
-        return cls(ok=ok, value=value)
 
 
 def default_socket_path() -> Path:
@@ -256,13 +194,13 @@ class Rect:
     MIN_HEIGHT: ClassVar[int] = 40
 
     @classmethod
-    def from_ax_values(cls, *, position: AxPoint, size: AxSize) -> Rect:
+    def from_ax_values(cls, *, position: CocoaPoint, size: CocoaSize) -> Rect:
         return cls.rounded(
             cls.FloatRect(
-                x=position.x,
-                y=position.y,
-                width=size.width,
-                height=size.height,
+                x=float(position.x),
+                y=float(position.y),
+                width=float(size.width),
+                height=float(size.height),
             )
         )
 
@@ -747,24 +685,18 @@ def parse_binding_command(command: str) -> IpcRequest:
     >>> parse_binding_command("columns 1.7")
     IpcRequest(kind='columns', direction=None, desktop=None, columns=1.7)
     """
-    parts = shlex.split(command)
-    assert len(parts) > 0
-    kind = cast(CommandKind, parts[0])
-    match kind:
-        case "focus" | "move":
-            assert len(parts) == COMMAND_WITH_ARG_LENGTH
-            return IpcRequest(kind=kind, direction=cast(Direction, parts[1]))
-        case "goto-desktop":
-            assert len(parts) == COMMAND_WITH_ARG_LENGTH
-            return IpcRequest(kind=kind, desktop=int(parts[1]))
-        case "columns":
-            assert len(parts) == COMMAND_WITH_ARG_LENGTH
-            return IpcRequest(kind=kind, columns=float(parts[1]))
-        case "fullscreen" | "close" | "retile" | "status" | "stop":
-            assert len(parts) == COMMAND_WITHOUT_ARG_LENGTH
+    match shlex.split(command):
+        case [("focus" | "move") as kind, direction]:
+            return IpcRequest(kind=kind, direction=cast(Direction, direction))
+        case ["goto-desktop", desktop]:
+            return IpcRequest(kind="goto-desktop", desktop=int(desktop))
+        case ["columns", columns]:
+            return IpcRequest(kind="columns", columns=float(columns))
+        case [("fullscreen" | "close" | "retile" | "status" | "stop") as kind]:
             return IpcRequest(kind=kind)
         case _:
-            assert_never(kind)
+            msg = f"invalid keybinding command: {command}"
+            raise ValueError(msg)
 
 
 class KeyBindingManager:
@@ -837,8 +769,8 @@ class KeyBindingManager:
                 self.consume_current_event = True
 
     def _intercept(
-        self, _event_type: DynamicObjC, event: KeyboardEvent
-    ) -> KeyboardEvent | None:
+        self, _event_type: DynamicObjC, event: DynamicObjC
+    ) -> DynamicObjC | None:
         with self.lock:
             consume = self.consume_current_event
             self.consume_current_event = False
@@ -869,18 +801,16 @@ class MacOS:
 
     @staticmethod
     def ax_get(element: AxElement, attribute: AxAttribute) -> AxAttributeValue | None:
-        result = AxCopyValue[AxError, AxAttributeValue].parse(
+        error, value = cast(
+            tuple[AxAttributeValue, AxAttributeValue],
             cast(
-                tuple[AxError, AxAttributeValue],
-                cast(
-                    object,
-                    HIServices.AXUIElementCopyAttributeValue(element, attribute, None),
-                ),
+                object,
+                HIServices.AXUIElementCopyAttributeValue(element, attribute, None),
             ),
         )
-        if result.error != HIServices.kAXErrorSuccess:
+        if error != HIServices.kAXErrorSuccess:
             return None
-        return result.value
+        return value
 
     @staticmethod
     def ax_set(
@@ -896,15 +826,13 @@ class MacOS:
 
     @staticmethod
     def ax_pid(element: AxElement) -> int | None:
-        result = AxCopyValue[AxError, NumberLike].parse(
-            cast(
-                tuple[AxError, NumberLike],
-                cast(object, HIServices.AXUIElementGetPid(element, None)),
-            )
+        error, pid = cast(
+            tuple[AxAttributeValue, NumberLike],
+            cast(object, HIServices.AXUIElementGetPid(element, None)),
         )
-        if result.error != HIServices.kAXErrorSuccess:
+        if error != HIServices.kAXErrorSuccess:
             return None
-        return int(result.value)
+        return int(pid)
 
     @staticmethod
     def ax_bool(
@@ -916,38 +844,30 @@ class MacOS:
         return bool(value)
 
     @staticmethod
-    def ax_point(value: AxAttributeValue) -> AxPoint | None:
-        result = AxValue[CocoaPoint].parse(
+    def ax_point(value: AxAttributeValue) -> CocoaPoint | None:
+        ok, point = cast(
+            tuple[bool, CocoaPoint],
             cast(
-                tuple[bool, CocoaPoint],
-                cast(
-                    object,
-                    HIServices.AXValueGetValue(
-                        value, HIServices.kAXValueTypeCGPoint, None
-                    ),
-                ),
+                object,
+                HIServices.AXValueGetValue(value, HIServices.kAXValueTypeCGPoint, None),
             ),
         )
-        if not result.ok:
+        if not ok:
             return None
-        return AxPoint.parse(result.value)
+        return point
 
     @staticmethod
-    def ax_size(value: AxAttributeValue) -> AxSize | None:
-        result = AxValue[CocoaSize].parse(
+    def ax_size(value: AxAttributeValue) -> CocoaSize | None:
+        ok, size = cast(
+            tuple[bool, CocoaSize],
             cast(
-                tuple[bool, CocoaSize],
-                cast(
-                    object,
-                    HIServices.AXValueGetValue(
-                        value, HIServices.kAXValueTypeCGSize, None
-                    ),
-                ),
+                object,
+                HIServices.AXValueGetValue(value, HIServices.kAXValueTypeCGSize, None),
             ),
         )
-        if not result.ok:
+        if not ok:
             return None
-        return AxSize.parse(result.value)
+        return size
 
     @staticmethod
     def ax_frame(window: AxElement) -> Rect | None:
@@ -1700,18 +1620,15 @@ class WindowDaemon:
 
     def _observe_app(self, *, pid: int) -> None:
         app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
-        result = AxCopyValue[AxError, AxElement].parse(
+        error, observer = cast(
+            tuple[AxAttributeValue, AxElement],
             cast(
-                tuple[AxError, AxElement],
-                cast(
-                    object,
-                    HIServices.AXObserverCreate(pid, self.ax_callback, None),
-                ),
-            )
+                object,
+                HIServices.AXObserverCreate(pid, self.ax_callback, None),
+            ),
         )
-        if result.error != HIServices.kAXErrorSuccess:
+        if error != HIServices.kAXErrorSuccess:
             return
-        observer = result.value
         self.observers[pid] = AppObserver(pid=pid, app=app, observer=observer)
         _ = CoreFoundation.CFRunLoopAddSource(
             self.run_loop or CoreFoundation.CFRunLoopGetCurrent(),
@@ -1744,7 +1661,7 @@ class WindowDaemon:
         self.observed_windows.add(window.key)
 
     def _add_notification(
-        self, *, pid: int, element: AxElement, notification: AxNotification
+        self, *, pid: int, element: AxElement, notification: AxAttribute
     ) -> None:
         observer = self.observers.get(pid)
         if observer is None:
@@ -1766,7 +1683,7 @@ class WindowDaemon:
         _refcon: AxAttributeValue,
     ) -> None:
         if notification in cast(
-            tuple[AxNotification, ...],
+            tuple[AxAttribute, ...],
             (
                 HIServices.kAXWindowCreatedNotification,
                 HIServices.kAXFocusedWindowChangedNotification,
@@ -1780,7 +1697,7 @@ class WindowDaemon:
         self.schedule_retile(
             capture_row_weights=notification
             in cast(
-                tuple[AxNotification, ...],
+                tuple[AxAttribute, ...],
                 (
                     HIServices.kAXMovedNotification,
                     HIServices.kAXResizedNotification,
