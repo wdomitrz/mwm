@@ -42,7 +42,6 @@ from typing import (
     Protocol,
     Self,
     TypeAlias,
-    TypedDict,
     TypeVar,
     assert_never,
     cast,
@@ -104,26 +103,11 @@ DESKTOP_KEY_CODES: dict[int, int] = {
     10: 0x1D,
 }
 FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
-CLIENT_COMMANDS_WITHOUT_ARGS: tuple[
-    Literal["fullscreen", "close", "retile", "status", "stop"], ...
-] = ("fullscreen", "close", "retile", "status", "stop")
 UTILITY_COMMANDS: tuple[Literal["retile", "status", "stop"], ...] = (
     "retile",
     "status",
     "stop",
 )
-COMMAND_KINDS: tuple[CommandKind, ...] = (
-    "focus",
-    "move",
-    "goto-desktop",
-    "fullscreen",
-    "close",
-    "columns",
-    "retile",
-    "status",
-    "stop",
-)
-CLI_COMMANDS: tuple[CliCommand, ...] = ("daemon", *COMMAND_KINDS, "launchd-plist")
 
 
 class DynamicObjC(Protocol):
@@ -166,10 +150,6 @@ class KeyboardKey(Protocol):
     name: str | None
     vk: int | None
     char: str | None
-
-
-class KeyBindingConfig(TypedDict, total=False):
-    bindings: KeyBindingMap
 
 
 @runtime_checkable
@@ -446,24 +426,12 @@ class ScreenInfo:
 @dataclass(frozen=True, kw_only=True)
 class VisibleWindowIndex:
     numbers_by_pid: dict[int, set[int]]
-    order_by_pid_number: dict[tuple[int, int], int]
     frames_by_pid: dict[int, tuple[tuple[int, Rect], ...]] = field(default_factory=dict)
 
-    def contains(
-        self, *, pid: int, number: int | None, frame: Rect | None = None
-    ) -> bool:
+    def contains(self, *, pid: int, number: int | None, frame: Rect) -> bool:
         if number is None:
-            if frame is None:
-                return pid in self.frames_by_pid or pid in self.numbers_by_pid
             return self._nearest_frame_order(pid=pid, frame=frame) is not None
         return number in self.numbers_by_pid.get(pid, set())
-
-    def order(self, *, pid: int, number: int | None, frame: Rect | None = None) -> int:
-        if number is None:
-            if frame is None:
-                return 1_000_000
-            return self._nearest_frame_order(pid=pid, frame=frame) or 1_000_000
-        return self.order_by_pid_number.get((pid, number), 1_000_000)
 
     def _nearest_frame_order(self, *, pid: int, frame: Rect) -> int | None:
         frames = self.frames_by_pid.get(pid)
@@ -749,15 +717,9 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
 def load_keybindings(path: Path | None) -> tuple[KeyBinding, ...]:
     if path is None:
         return default_keybindings()
-    config = cast(
-        KeyBindingConfig | KeyBindingMap,
-        json.loads(path.expanduser().read_text(encoding="utf-8")),
+    return parse_keybinding_map(
+        cast(KeyBindingMap, json.loads(path.expanduser().read_text(encoding="utf-8")))
     )
-    match config:
-        case {"bindings": bindings}:
-            return parse_keybinding_map(cast(KeyBindingMap, bindings))
-        case _:
-            return parse_keybinding_map(cast(KeyBindingMap, config))
 
 
 def parse_keybinding_map(raw: KeyBindingMap) -> tuple[KeyBinding, ...]:
@@ -1091,7 +1053,6 @@ class MacOS:
             Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID),
         )
         numbers_by_pid: dict[int, set[int]] = {}
-        order_by_pid_number: dict[tuple[int, int], int] = {}
         frames_by_pid: dict[int, list[tuple[int, Rect]]] = {}
         for order, raw in enumerate(raw_windows):
             if int(cast(NumberLike, raw.get(Quartz.kCGWindowLayer, 1))) != 0:
@@ -1105,7 +1066,6 @@ class MacOS:
             number = int(cast(NumberLike, raw.get(Quartz.kCGWindowNumber, 0)))
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
-                order_by_pid_number[(pid, number)] = order
                 bounds = raw.get(Quartz.kCGWindowBounds)
                 if isinstance(bounds, Mapping):
                     frame = Rect.from_quartz_bounds(bounds)
@@ -1113,7 +1073,6 @@ class MacOS:
                         frames_by_pid.setdefault(pid, []).append((order, frame))
         return VisibleWindowIndex(
             numbers_by_pid=numbers_by_pid,
-            order_by_pid_number=order_by_pid_number,
             frames_by_pid={
                 pid: tuple(pid_frames) for pid, pid_frames in frames_by_pid.items()
             },
@@ -1199,7 +1158,6 @@ class MacOS:
             frame=frame,
             screen=screen,
             number=number,
-            order=None,
         )
 
     @staticmethod
@@ -1262,7 +1220,6 @@ class MacOS:
             frame=frame,
             screen=screen,
             number=number,
-            order=None,
         )
 
     @staticmethod
@@ -1274,11 +1231,14 @@ class MacOS:
         frame: Rect,
         screen: ScreenInfo,
         number: int | None,
-        order: int | None,
     ) -> WindowInfo:
-        stable_id = MacOS.window_stable_id(window)
-        resolved_order = order if order is not None else number or stable_id
-        key = f"{pid}:{number}" if number is not None else f"{pid}:fallback:{stable_id}"
+        if number is None:
+            stable_id = MacOS.window_stable_id(window)
+            key = f"{pid}:fallback:{stable_id}"
+            order = stable_id
+        else:
+            key = f"{pid}:{number}"
+            order = number
         return WindowInfo(
             key=key,
             pid=pid,
@@ -1287,7 +1247,7 @@ class MacOS:
             frame=frame,
             screen_key=screen.key,
             window_number=number,
-            order=resolved_order,
+            order=order,
         )
 
     @staticmethod
@@ -2268,8 +2228,8 @@ def request_summary(request: IpcRequest) -> str:
         case "goto-desktop":
             return f"{request.kind} {request.desktop}"
         case "columns":
-            columns = "?" if request.columns is None else f"{request.columns:g}"
-            return f"columns {columns}"
+            assert request.columns is not None
+            return f"columns {request.columns:g}"
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             return request.kind
         case _:
