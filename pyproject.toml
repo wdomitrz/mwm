@@ -1,3 +1,8 @@
+[project]
+name = "mwm"
+version = "1.0"
+requires-python = ">=3.11"
+
 [tool.ruff]
 exclude = [".venv", "pyobjc"]
 
