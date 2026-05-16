@@ -157,8 +157,7 @@ class CocoaRect(Protocol):
     size: CocoaSize
 
 
-QuartzBounds: TypeAlias = Mapping[str, NumberLike]
-QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxAttributeValue | QuartzBounds]
+QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxAttributeValue]
 
 
 def default_socket_path() -> Path:
@@ -194,24 +193,6 @@ class Rect:
             width=size.width,
             height=size.height,
         )
-
-    @classmethod
-    def from_quartz_bounds(cls, raw: QuartzBounds) -> Rect | None:
-        """Convert a CGWindow bounds dictionary into a rectangle.
-
-        >>> Rect.from_quartz_bounds({"X": 1.2, "Y": 3.8, "Width": 10, "Height": 20})
-        Rect(x=1, y=4, width=10, height=20)
-        >>> Rect.from_quartz_bounds({"X": 1})
-        """
-        try:
-            return cls.rounded(
-                x=float(raw["X"]),
-                y=float(raw["Y"]),
-                width=float(raw["Width"]),
-                height=float(raw["Height"]),
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
 
     @classmethod
     def from_cocoa_rect(
@@ -353,12 +334,7 @@ class ScreenInfo:
 @dataclass(frozen=True, kw_only=True)
 class VisibleWindowIndex:
     numbers_by_pid: dict[int, set[int]]
-    pids_with_visible_frames: set[int]
-
-    def contains(self, *, pid: int, number: int | None) -> bool:
-        if number is None:
-            return pid in self.pids_with_visible_frames
-        return number in self.numbers_by_pid.get(pid, set())
+    pids_with_visible_windows: set[int]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -937,7 +913,7 @@ class MacOS:
             Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID),
         )
         numbers_by_pid: dict[int, set[int]] = {}
-        pids_with_visible_frames: set[int] = set()
+        pids_with_visible_windows: set[int] = set()
         for raw in raw_windows:
             if int(cast(NumberLike, raw.get(Quartz.kCGWindowLayer, 1))) != 0:
                 continue
@@ -950,12 +926,10 @@ class MacOS:
             number = int(cast(NumberLike, raw.get(Quartz.kCGWindowNumber, 0)))
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
-                bounds = raw.get(Quartz.kCGWindowBounds)
-                if isinstance(bounds, Mapping) and Rect.from_quartz_bounds(bounds):
-                    pids_with_visible_frames.add(pid)
+                pids_with_visible_windows.add(pid)
         return VisibleWindowIndex(
             numbers_by_pid=numbers_by_pid,
-            pids_with_visible_frames=pids_with_visible_frames,
+            pids_with_visible_windows=pids_with_visible_windows,
         )
 
     @staticmethod
@@ -1090,7 +1064,10 @@ class MacOS:
         if screen is None:
             return None
         number = MacOS.window_number(window)
-        if not visible_index.contains(pid=pid, number=number):
+        if number is None:
+            if pid not in visible_index.pids_with_visible_windows:
+                return None
+        elif number not in visible_index.numbers_by_pid.get(pid, set()):
             return None
         title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
         return MacOS._window_info_from_values(
@@ -1188,31 +1165,17 @@ class LayoutState:
         columns = [column for column in columns if column]
         known_keys = {key for column in columns for key in column}
         for key in visible_keys:
-            if key not in known_keys:
-                self._append_new_key(columns=columns, key=key, config=config)
-        columns = self._fit_column_count(
-            columns=columns,
-            target=min(len(visible_keys), config.max_column_count),
-        )
-        self.columns_by_screen[screen.key] = columns
-        return columns
-
-    @staticmethod
-    def _append_new_key(
-        *, columns: list[list[str]], key: str, config: LayoutConfig
-    ) -> None:
-        if not columns or len(columns) < config.max_column_count:
-            columns.append([key])
-            return
-        columns[-1].append(key)
-
-    @staticmethod
-    def _fit_column_count(*, columns: list[list[str]], target: int) -> list[list[str]]:
-        if target <= 0:
-            return []
-        while len(columns) > target:
+            if key in known_keys:
+                continue
+            if not columns or len(columns) < config.max_column_count:
+                columns.append([key])
+            else:
+                columns[-1].append(key)
+        target_columns = min(len(visible_keys), config.max_column_count)
+        while len(columns) > target_columns:
             extra = columns.pop()
             columns[-1].extend(extra)
+        self.columns_by_screen[screen.key] = columns
         return columns
 
     def find(self, *, key: str) -> tuple[str, int, int] | None:
