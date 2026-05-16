@@ -841,8 +841,9 @@ class MacOS:
             return
         prompt_key = HIServices.kAXTrustedCheckOptionPrompt
         _trusted = HIServices.AXIsProcessTrustedWithOptions({prompt_key: True})
-        msg = "Accessibility permission is required; grant it in System Settings and start the daemon again."
-        raise RuntimeError(msg)
+        raise SystemExit(
+            "Accessibility permission is required; grant it in System Settings and start the daemon again."
+        )
 
     @staticmethod
     def ax_get(element: AxElement, attribute: AxAttribute) -> ObjCValue | None:
@@ -1488,8 +1489,7 @@ class WindowDaemon:
         if socket_path.exists():
             stale = Ipc.send(path=socket_path, request=SimpleRequest(kind="status"))
             if stale.ok:
-                msg = f"daemon already running at {socket_path}"
-                raise RuntimeError(msg)
+                raise SystemExit(f"daemon already running at {socket_path}")
             socket_path.unlink()
         thread = threading.Thread(target=self._serve_ipc, name="mwm-ipc", daemon=True)
         thread.start()
@@ -2381,8 +2381,7 @@ class LaunchdPlistArgs:
     def default_uv_path() -> Path:
         uv = shutil.which("uv")
         if uv is None:
-            msg = "uv was not found on PATH; install uv or pass --uv PATH"
-            raise RuntimeError(msg)
+            raise SystemExit("uv was not found on PATH; install uv or pass --uv PATH")
         return Path(uv)
 
     @staticmethod
@@ -2486,8 +2485,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except RuntimeError as error:
-        print(error, file=sys.stderr)
-        raise SystemExit(1) from error
+    raise SystemExit(main())
