@@ -215,9 +215,7 @@ def default_socket_path() -> Path:
 
 def import_keyboard() -> DynamicObjC:
     try:
-        from pynput import (  # noqa: PLC0415  # pyright: ignore[reportMissingModuleSource]
-            keyboard,  # pyright: ignore[reportMissingModuleSource]
-        )
+        from pynput import keyboard  # noqa: PLC0415
     except ImportError as error:
         msg = "pynput is required for built-in keybindings; use --no-keybindings to run without it."
         raise RuntimeError(msg) from error
@@ -902,11 +900,11 @@ class MacApi:
     @classmethod
     def load(cls) -> MacApi:
         try:
-            import AppKit  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
-            import CoreFoundation  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
-            import HIServices  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
-            import objc  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
-            import Quartz  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+            import AppKit  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+            import CoreFoundation  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+            import HIServices  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+            import objc  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+            import Quartz  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         except ImportError as error:
             msg = (
                 "mwm requires PyObjC on macOS. Install the script dependencies with uv, "
