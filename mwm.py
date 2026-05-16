@@ -594,7 +594,20 @@ class KeyChord:
         "alt": 2,
         "shift": 3,
     }
-    MODIFIERS: ClassVar[frozenset[ModifierName]] = frozenset(MODIFIER_ORDER.keys())
+    MODIFIER_ALIASES: ClassVar[dict[str, ModifierName]] = {
+        "cmd": "cmd",
+        "cmd_l": "cmd",
+        "cmd_r": "cmd",
+        "ctrl": "ctrl",
+        "ctrl_l": "ctrl",
+        "ctrl_r": "ctrl",
+        "alt": "alt",
+        "alt_l": "alt",
+        "alt_r": "alt",
+        "shift": "shift",
+        "shift_l": "shift",
+        "shift_r": "shift",
+    }
     VK_ALIASES: ClassVar[dict[int, str]] = {
         0x00: "a",
         0x01: "s",
@@ -668,17 +681,11 @@ class KeyChord:
 
     @classmethod
     def normalise_modifier(cls, value: str) -> ModifierName:
-        modifier = cls.modifier_from_event_key(value.strip().casefold())
+        modifier = cls.MODIFIER_ALIASES.get(value.strip().casefold())
         if modifier is not None:
             return modifier
         msg = f"unknown modifier: {value}"
         raise ValueError(msg)
-
-    @classmethod
-    def modifier_from_event_key(cls, value: str) -> ModifierName | None:
-        if value in cls.MODIFIERS:
-            return value
-        return None
 
     @classmethod
     def normalise_key(cls, value: str) -> str:
@@ -839,7 +846,7 @@ class KeyBindingManager:
             key_name = KeyChord.from_event_key(key)
             if key_name is None:
                 return
-            if modifier := KeyChord.modifier_from_event_key(key_name):
+            if modifier := KeyChord.MODIFIER_ALIASES.get(key_name):
                 self.pressed_modifiers.add(modifier)
                 return
             repeated = key_name in self.pressed_keys
@@ -859,7 +866,7 @@ class KeyBindingManager:
             key_name = KeyChord.from_event_key(key)
             if key_name is None:
                 return
-            if modifier := KeyChord.modifier_from_event_key(key_name):
+            if modifier := KeyChord.MODIFIER_ALIASES.get(key_name):
                 self.pressed_modifiers.discard(modifier)
                 return
             self.pressed_keys.discard(key_name)
