@@ -31,7 +31,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import FrameType
@@ -44,7 +44,6 @@ from typing import (
     TypedDict,
     assert_never,
     cast,
-    override,
     runtime_checkable,
 )
 
@@ -53,7 +52,7 @@ import CoreFoundation  # pyright: ignore[reportMissingTypeStubs, reportAssignmen
 import HIServices  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
 import objc  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
 import Quartz  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
-from pynput import keyboard  # pyright: ignore[reportAssignmentType]
+from pynput import keyboard
 
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
@@ -141,23 +140,18 @@ CoreFoundation: DynamicObjC
 HIServices: DynamicObjC
 objc: DynamicObjC
 Quartz: DynamicObjC
-keyboard: DynamicObjC
 
 
-class AxElement(Protocol):
-    @override
-    def __hash__(self) -> int: ...
-
-
+AxElement: TypeAlias = Hashable
 AxAttribute: TypeAlias = DynamicObjC | str
 AxRawValue: TypeAlias = None | bool | NumberLike | AxElement | tuple["AxRawValue", ...]
 AxTuple: TypeAlias = tuple[AxRawValue, AxRawValue]
 AxCallback: TypeAlias = DynamicObjC
 AxNotification: TypeAlias = AxAttribute
-KeyboardEvent: TypeAlias = DynamicObjC
-KeyboardListener: TypeAlias = DynamicObjC
 RunLoopHandle: TypeAlias = DynamicObjC
 TimerHandle: TypeAlias = DynamicObjC
+KeyboardEvent: TypeAlias = DynamicObjC
+KeyboardCallback: TypeAlias = Callable[[keyboard.Key | keyboard.KeyCode | None], None]
 
 
 class Subparsers(Protocol):
@@ -191,10 +185,6 @@ class CocoaRect(Protocol):
     size: CocoaSize
 
 
-AxPointSource = tuple[NumberLike, NumberLike] | CocoaPoint
-AxSizeSource = tuple[NumberLike, NumberLike] | CocoaSize
-
-
 QuartzBounds: TypeAlias = Mapping[str, NumberLike]
 QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxRawValue | QuartzBounds]
 
@@ -205,10 +195,8 @@ class AxPoint:
     y: float
 
     @classmethod
-    def parse(cls, raw: AxPointSource) -> Self:
+    def parse(cls, raw: CocoaPoint) -> Self:
         match raw:
-            case (x, y):
-                return cls(x=float(x), y=float(y))
             case CocoaPoint() as point:
                 return cls(x=float(point.x), y=float(point.y))
             case _:
@@ -221,10 +209,8 @@ class AxSize:
     height: float
 
     @classmethod
-    def parse(cls, raw: AxSizeSource) -> Self:
+    def parse(cls, raw: CocoaSize) -> Self:
         match raw:
-            case (width, height):
-                return cls(width=float(width), height=float(height))
             case CocoaSize() as size:
                 return cls(width=float(size.width), height=float(size.height))
             case _:
@@ -842,12 +828,12 @@ class KeyBindingManager:
         self.pressed_keys: set[str] = set()
         self.suppressed_releases: set[str] = set()
         self.consume_current_event: bool = False
-        self.listener: KeyboardListener | None = None
+        self.listener: keyboard.Listener | None = None
 
     def start(self) -> None:
         listener = keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release,
+            on_press=cast(KeyboardCallback, self._on_press),
+            on_release=cast(KeyboardCallback, self._on_release),
             suppress=False,
             darwin_intercept=self._intercept,
         )
@@ -992,7 +978,7 @@ class MacOS:
         )
         if not result.ok:
             return None
-        return AxPoint.parse(cast(AxPointSource, result.value))
+        return AxPoint.parse(cast(CocoaPoint, result.value))
 
     @staticmethod
     def ax_size(value: AxRawValue) -> AxSize | None:
@@ -1009,7 +995,7 @@ class MacOS:
         )
         if not result.ok:
             return None
-        return AxSize.parse(cast(AxSizeSource, result.value))
+        return AxSize.parse(cast(CocoaSize, result.value))
 
     @staticmethod
     def ax_frame(window: AxElement) -> Rect | None:
