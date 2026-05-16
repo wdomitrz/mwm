@@ -174,20 +174,13 @@ class Rect:
     width: int
     height: int
 
-    @dataclass(frozen=True, kw_only=True)
-    class FloatRect:
-        x: float
-        y: float
-        width: float
-        height: float
-
     @classmethod
-    def rounded(cls, v: FloatRect) -> Self:
+    def rounded(cls, *, x: float, y: float, width: float, height: float) -> Self:
         return cls(
-            x=round(v.x),
-            y=round(v.y),
-            width=round(v.width),
-            height=round(v.height),
+            x=round(x),
+            y=round(y),
+            width=round(width),
+            height=round(height),
         )
 
     MIN_WIDTH: ClassVar[int] = 40
@@ -196,12 +189,10 @@ class Rect:
     @classmethod
     def from_ax_values(cls, *, position: CocoaPoint, size: CocoaSize) -> Rect:
         return cls.rounded(
-            cls.FloatRect(
-                x=position.x,
-                y=position.y,
-                width=size.width,
-                height=size.height,
-            )
+            x=position.x,
+            y=position.y,
+            width=size.width,
+            height=size.height,
         )
 
     @classmethod
@@ -214,12 +205,10 @@ class Rect:
         """
         try:
             return cls.rounded(
-                cls.FloatRect(
-                    x=float(raw["X"]),
-                    y=float(raw["Y"]),
-                    width=float(raw["Width"]),
-                    height=float(raw["Height"]),
-                )
+                x=float(raw["X"]),
+                y=float(raw["Y"]),
+                width=float(raw["Width"]),
+                height=float(raw["Height"]),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -231,10 +220,10 @@ class Rect:
         *,
         main_screen_height: float,
     ) -> Rect:
-        x = round(float(raw.origin.x))
-        height = round(float(raw.size.height))
-        y = round(main_screen_height - float(raw.origin.y) - float(raw.size.height))
-        width = round(float(raw.size.width))
+        x = round(raw.origin.x)
+        height = round(raw.size.height)
+        y = round(main_screen_height - raw.origin.y - raw.size.height)
+        width = round(raw.size.width)
         return cls(x=x, y=y, width=width, height=height)
 
     @property
@@ -364,25 +353,12 @@ class ScreenInfo:
 @dataclass(frozen=True, kw_only=True)
 class VisibleWindowIndex:
     numbers_by_pid: dict[int, set[int]]
-    frames_by_pid: dict[int, tuple[tuple[int, Rect], ...]] = field(default_factory=dict)
+    pids_with_visible_frames: set[int]
 
-    def contains(self, *, pid: int, number: int | None, frame: Rect) -> bool:
+    def contains(self, *, pid: int, number: int | None) -> bool:
         if number is None:
-            return self._nearest_frame_order(pid=pid, frame=frame) is not None
+            return pid in self.pids_with_visible_frames
         return number in self.numbers_by_pid.get(pid, set())
-
-    def _nearest_frame_order(self, *, pid: int, frame: Rect) -> int | None:
-        frames = self.frames_by_pid.get(pid)
-        if not frames:
-            return None
-        order, _match = max(
-            frames,
-            key=lambda item: (
-                item[1].intersection_area(frame),
-                -item[1].distance_to(frame),
-            ),
-        )
-        return order
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -400,8 +376,6 @@ class LayoutConfig:
         'disabled'
         >>> LayoutConfig(poll_seconds="disabled").poll_seconds
         'disabled'
-        >>> LayoutConfig(columns=2.5).target_column_count(window_count=2)
-        2
         >>> LayoutConfig(columns=float("nan"))
         Traceback (most recent call last):
         ...
@@ -420,19 +394,9 @@ class LayoutConfig:
             msg = "poll_seconds must be a finite positive number"
             raise ValueError(msg)
 
-    def with_columns(self, columns: float) -> LayoutConfig:
-        return LayoutConfig(
-            columns=columns,
-            poll_seconds=self.poll_seconds,
-            socket_path=self.socket_path,
-        )
-
     @property
     def max_column_count(self) -> int:
         return max(1, math.ceil(self.columns))
-
-    def target_column_count(self, *, window_count: int) -> int:
-        return min(window_count, self.max_column_count)
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -973,8 +937,8 @@ class MacOS:
             Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID),
         )
         numbers_by_pid: dict[int, set[int]] = {}
-        frames_by_pid: dict[int, list[tuple[int, Rect]]] = {}
-        for order, raw in enumerate(raw_windows):
+        pids_with_visible_frames: set[int] = set()
+        for raw in raw_windows:
             if int(cast(NumberLike, raw.get(Quartz.kCGWindowLayer, 1))) != 0:
                 continue
             if not bool(raw.get(Quartz.kCGWindowIsOnscreen, False)):
@@ -987,15 +951,11 @@ class MacOS:
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
                 bounds = raw.get(Quartz.kCGWindowBounds)
-                if isinstance(bounds, Mapping):
-                    frame = Rect.from_quartz_bounds(bounds)
-                    if frame is not None:
-                        frames_by_pid.setdefault(pid, []).append((order, frame))
+                if isinstance(bounds, Mapping) and Rect.from_quartz_bounds(bounds):
+                    pids_with_visible_frames.add(pid)
         return VisibleWindowIndex(
             numbers_by_pid=numbers_by_pid,
-            frames_by_pid={
-                pid: tuple(pid_frames) for pid, pid_frames in frames_by_pid.items()
-            },
+            pids_with_visible_frames=pids_with_visible_frames,
         )
 
     @staticmethod
@@ -1130,7 +1090,7 @@ class MacOS:
         if screen is None:
             return None
         number = MacOS.window_number(window)
-        if not visible_index.contains(pid=pid, number=number, frame=frame):
+        if not visible_index.contains(pid=pid, number=number):
             return None
         title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
         return MacOS._window_info_from_values(
@@ -1232,7 +1192,7 @@ class LayoutState:
                 self._append_new_key(columns=columns, key=key, config=config)
         columns = self._fit_column_count(
             columns=columns,
-            target=config.target_column_count(window_count=len(visible_keys)),
+            target=min(len(visible_keys), config.max_column_count),
         )
         self.columns_by_screen[screen.key] = columns
         return columns
@@ -1332,10 +1292,6 @@ class LayoutState:
 
 class Ipc:
     CLIENT_TIMEOUT_SECONDS: ClassVar[float] = 10.0
-
-    @staticmethod
-    def default_socket_path() -> Path:
-        return default_socket_path()
 
     @staticmethod
     def send(*, path: Path, request: IpcRequest) -> IpcResponse:
@@ -1580,7 +1536,11 @@ class WindowDaemon:
                     if request.columns is None:
                         msg = "columns command requires a column count"
                         raise ValueError(msg)
-                    self.config = self.config.with_columns(request.columns)
+                    self.config = LayoutConfig(
+                        columns=request.columns,
+                        poll_seconds=self.config.poll_seconds,
+                        socket_path=self.config.socket_path,
+                    )
                     self.retile()
                     return f"columns set to {request.columns:g}"
                 case "retile":
@@ -2201,7 +2161,7 @@ class DaemonArgs:
         config = LayoutConfig(
             columns=self.columns,
             poll_seconds=self.poll_seconds,
-            socket_path=self.socket_path or Ipc.default_socket_path(),
+            socket_path=self.socket_path or default_socket_path(),
         )
         keybindings = (
             load_keybindings(self.keybindings_path)
@@ -2297,7 +2257,7 @@ class ClientArgs:
 
     def main(self) -> int:
         response = Ipc.send(
-            path=self.socket_path or Ipc.default_socket_path(), request=self.request
+            path=self.socket_path or default_socket_path(), request=self.request
         )
         if self.verbose:
             output = sys.stdout if response.ok else sys.stderr
