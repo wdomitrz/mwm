@@ -28,6 +28,8 @@ Current runtime behavior:
   `./mwm.py daemon --poll-seconds 30` to enable a fallback repair poll.
 - Keybindings use physical key codes where possible, so Option-modified
   characters still match bindings such as `alt-h`.
+- Directional keybindings support both `h/j/k/l` and Command arrow keys, e.g.
+  `cmd-left` focuses left and `shift-cmd-left` moves left.
 - `shift-alt-q` closes the currently focused window by pressing its AX close
   button.
 - `alt-1` through `alt-0` switches to Desktop 1 through 10.
