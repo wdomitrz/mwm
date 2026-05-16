@@ -35,6 +35,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import (
+    Never,
+    runtime_checkable,
     ClassVar,
     Literal,
     Protocol,
@@ -126,16 +128,19 @@ class Subparsers(Protocol):
     def add_parser(self, name: str, **kwargs: object) -> argparse.ArgumentParser: ...
 
 
+@runtime_checkable
 class CocoaPoint(Protocol):
     x: float
     y: float
 
 
+@runtime_checkable
 class CocoaSize(Protocol):
     width: float
     height: float
 
 
+@runtime_checkable
 class CocoaRect(Protocol):
     origin: CocoaPoint
     size: CocoaSize
@@ -148,12 +153,13 @@ class AxPoint:
 
     @classmethod
     def parse(cls, raw: object) -> Self:
-        if isinstance(raw, tuple):
-            x, y = cast(tuple[float, float], raw)
-            return cls(x=float(x), y=float(y))
-        else:
-            point = cast(CocoaPoint, raw)
-            return cls(x=float(point.x), y=float(point.y))
+        match raw:
+            case float() | int() | str() as x, float() | int() | str() as y:
+                return cls(x=float(x), y=float(y))
+            case CocoaPoint() as point:
+                return cls(x=float(point.x), y=float(point.y))
+            case _:
+                assert_never(cast(Never, raw))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -163,12 +169,13 @@ class AxSize:
 
     @classmethod
     def parse(cls, raw: object) -> Self:
-        if isinstance(raw, tuple):
-            width, height = cast(tuple[float, float], raw)
-            return cls(width=float(width), height=float(height))
-        else:
-            size = cast(CocoaSize, raw)
-            return cls(width=float(size.width), height=float(size.height))
+        match raw:
+            case float() | int() | str() as width, float() | int() | str() as height:
+                return cls(width=float(width), height=float(height))
+            case CocoaSize() as size:
+                return cls(width=float(size.width), height=float(size.height))
+            case _:
+                assert_never(cast(Never, raw))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -178,8 +185,11 @@ class AxCopyValue:
 
     @classmethod
     def parse(cls, raw: object) -> Self:
-        error, value = cast(tuple[object, object], raw)
-        return cls(error=error, value=value)
+        match raw:
+            case object() as error, object() as value:
+                return cls(error=error, value=value)
+            case _:
+                assert_never(cast(Never, raw))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -189,8 +199,11 @@ class AxValue:
 
     @classmethod
     def parse(cls, raw: object) -> AxValue:
-        ok, value = cast(tuple[object, object], raw)
-        return cls(ok=bool(ok), value=value)
+        match raw:
+            case object() as ok, object() as value:
+                return cls(ok=bool(ok), value=value)
+            case _:
+                assert_never(cast(Never, raw))
 
 
 def default_socket_path() -> Path:
