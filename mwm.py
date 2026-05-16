@@ -83,26 +83,35 @@ KeyBindingMap: TypeAlias = Mapping[str, str]
 PlistScalar: TypeAlias = bool | int | float | str | bytes
 PlistValue: TypeAlias = PlistScalar | list["PlistValue"] | dict[str, "PlistValue"]
 Plist: TypeAlias = dict[str, PlistValue]
-LAUNCHD_LABEL = "mwm"
-LOCAL_BIN_NAME = ".local/bin/mwm.py"
-DESKTOP_KEY_CODES: dict[int, int] = {
-    1: 0x12,
-    2: 0x13,
-    3: 0x14,
-    4: 0x15,
-    5: 0x17,
-    6: 0x16,
-    7: 0x1A,
-    8: 0x1C,
-    9: 0x19,
-    10: 0x1D,
-}
-FOCUS_MOVE_COMMANDS: tuple[Literal["focus", "move"], ...] = ("focus", "move")
-UTILITY_COMMANDS: tuple[Literal["retile", "status", "stop"], ...] = (
-    "retile",
-    "status",
-    "stop",
-)
+
+
+class Launchd:
+    LABEL: ClassVar[str] = "mwm"
+    LOCAL_BIN_NAME: ClassVar[str] = ".local/bin/mwm.py"
+
+
+class DesktopShortcut:
+    KEY_CODES: ClassVar[Mapping[int, int]] = {
+        1: 0x12,
+        2: 0x13,
+        3: 0x14,
+        4: 0x15,
+        5: 0x17,
+        6: 0x16,
+        7: 0x1A,
+        8: 0x1C,
+        9: 0x19,
+        10: 0x1D,
+    }
+
+
+class CliCommands:
+    FOCUS_MOVE: ClassVar[tuple[Literal["focus", "move"], ...]] = ("focus", "move")
+    UTILITY: ClassVar[tuple[Literal["retile", "status", "stop"], ...]] = (
+        "retile",
+        "status",
+        "stop",
+    )
 
 
 class DynamicObjC(Protocol):
@@ -433,18 +442,14 @@ class PendingIpcCall:
         return self.response
 
 
-@dataclass(frozen=True, kw_only=True)
-class KeyChord:
-    modifiers: tuple[ModifierName, ...]
-    key: str
-
-    MODIFIER_ORDER: ClassVar[dict[ModifierName, int]] = {
+class KeyboardNames:
+    MODIFIER_ORDER: ClassVar[Mapping[ModifierName, int]] = {
         "cmd": 0,
         "ctrl": 1,
         "alt": 2,
         "shift": 3,
     }
-    MODIFIER_ALIASES: ClassVar[dict[str, ModifierName]] = {
+    MODIFIER_ALIASES: ClassVar[Mapping[str, ModifierName]] = {
         "cmd": "cmd",
         "cmd_l": "cmd",
         "cmd_r": "cmd",
@@ -458,7 +463,7 @@ class KeyChord:
         "shift_l": "shift",
         "shift_r": "shift",
     }
-    VK_ALIASES: ClassVar[dict[int, str]] = {
+    VK_ALIASES: ClassVar[Mapping[int, str]] = {
         0x00: "a",
         0x01: "s",
         0x02: "d",
@@ -497,6 +502,12 @@ class KeyChord:
         0x7E: "up",
     }
 
+
+@dataclass(frozen=True, kw_only=True)
+class KeyChord:
+    modifiers: tuple[ModifierName, ...]
+    key: str
+
     @classmethod
     def parse(cls, value: str) -> KeyChord:
         raw_tokens = value.replace("+", "-").split("-")
@@ -511,7 +522,7 @@ class KeyChord:
         modifiers = tuple(
             sorted(
                 modifier_set,
-                key=lambda item: cls.MODIFIER_ORDER[item],
+                key=lambda item: KeyboardNames.MODIFIER_ORDER[item],
             )
         )
         return cls(modifiers=modifiers, key=key)
@@ -523,7 +534,7 @@ class KeyChord:
             return name
         vk = getattr(key, "vk", None)
         if isinstance(vk, int):
-            return cls.VK_ALIASES.get(vk, f"vk:{vk}")
+            return KeyboardNames.VK_ALIASES.get(vk, f"vk:{vk}")
         char = getattr(key, "char", None)
         if isinstance(char, str) and char != "":
             return cls.normalise_key(char)
@@ -531,7 +542,7 @@ class KeyChord:
 
     @classmethod
     def normalise_modifier(cls, value: str) -> ModifierName:
-        modifier = cls.MODIFIER_ALIASES.get(value.strip().casefold())
+        modifier = KeyboardNames.MODIFIER_ALIASES.get(value.strip().casefold())
         if modifier is not None:
             return modifier
         msg = f"unknown modifier: {value}"
@@ -684,7 +695,7 @@ class KeyBindingManager:
             key_name = KeyChord.from_event_key(key)
             if key_name is None:
                 return
-            if modifier := KeyChord.MODIFIER_ALIASES.get(key_name):
+            if modifier := KeyboardNames.MODIFIER_ALIASES.get(key_name):
                 self.pressed_modifiers.add(modifier)
                 return
             repeated = key_name in self.pressed_keys
@@ -704,7 +715,7 @@ class KeyBindingManager:
             key_name = KeyChord.from_event_key(key)
             if key_name is None:
                 return
-            if modifier := KeyChord.MODIFIER_ALIASES.get(key_name):
+            if modifier := KeyboardNames.MODIFIER_ALIASES.get(key_name):
                 self.pressed_modifiers.discard(modifier)
                 return
             self.pressed_keys.discard(key_name)
@@ -730,7 +741,50 @@ class KeyBindingManager:
         return False
 
 
-AX_WINDOW_NUMBER_ATTRIBUTE: str = "AXWindowNumber"
+class Ax:
+    WINDOW_NUMBER_ATTRIBUTE: ClassVar[str] = "AXWindowNumber"
+
+
+class AxNotifications:
+    @staticmethod
+    def app() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXWindowCreatedNotification,
+            HIServices.kAXFocusedWindowChangedNotification,
+            HIServices.kAXMainWindowChangedNotification,
+        )
+
+    @staticmethod
+    def window() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXMovedNotification,
+            HIServices.kAXResizedNotification,
+            HIServices.kAXWindowMovedNotification,
+            HIServices.kAXWindowResizedNotification,
+            HIServices.kAXUIElementDestroyedNotification,
+            HIServices.kAXWindowMiniaturizedNotification,
+            HIServices.kAXWindowDeminiaturizedNotification,
+        )
+
+    @staticmethod
+    def refresh_observers() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXWindowCreatedNotification,
+            HIServices.kAXFocusedWindowChangedNotification,
+            HIServices.kAXMainWindowChangedNotification,
+            HIServices.kAXUIElementDestroyedNotification,
+            HIServices.kAXWindowMiniaturizedNotification,
+            HIServices.kAXWindowDeminiaturizedNotification,
+        )
+
+    @staticmethod
+    def capture_row_weights() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXMovedNotification,
+            HIServices.kAXResizedNotification,
+            HIServices.kAXWindowMovedNotification,
+            HIServices.kAXWindowResizedNotification,
+        )
 
 
 class MacOS:
@@ -851,7 +905,7 @@ class MacOS:
 
     @staticmethod
     def switch_desktop(number: int) -> bool:
-        key_code = DESKTOP_KEY_CODES.get(number)
+        key_code = DesktopShortcut.KEY_CODES.get(number)
         if key_code is None:
             return False
         for is_down in (True, False):
@@ -1111,7 +1165,7 @@ class MacOS:
 
     @staticmethod
     def window_number(window: AxElement) -> int | None:
-        value = MacOS.ax_get(window, AX_WINDOW_NUMBER_ATTRIBUTE)
+        value = MacOS.ax_get(window, Ax.WINDOW_NUMBER_ATTRIBUTE)
         if value is None:
             return None
         try:
@@ -1560,26 +1614,14 @@ class WindowDaemon:
             HIServices.AXObserverGetRunLoopSource(observer),
             CoreFoundation.kCFRunLoopCommonModes,
         )
-        for notification in (
-            HIServices.kAXWindowCreatedNotification,
-            HIServices.kAXFocusedWindowChangedNotification,
-            HIServices.kAXMainWindowChangedNotification,
-        ):
+        for notification in AxNotifications.app():
             self._add_notification(pid=pid, element=app, notification=notification)
 
     def _observe_window(self, window: WindowInfo) -> None:
         observer = self.observers.get(window.pid)
         if observer is None or window.key in self.observed_windows:
             return
-        for notification in (
-            HIServices.kAXMovedNotification,
-            HIServices.kAXResizedNotification,
-            HIServices.kAXWindowMovedNotification,
-            HIServices.kAXWindowResizedNotification,
-            HIServices.kAXUIElementDestroyedNotification,
-            HIServices.kAXWindowMiniaturizedNotification,
-            HIServices.kAXWindowDeminiaturizedNotification,
-        ):
+        for notification in AxNotifications.window():
             self._add_notification(
                 pid=window.pid, element=window.ax, notification=notification
             )
@@ -1607,29 +1649,10 @@ class WindowDaemon:
         notification: str,
         _refcon: ObjCValue,
     ) -> None:
-        if notification in cast(
-            tuple[AxAttribute, ...],
-            (
-                HIServices.kAXWindowCreatedNotification,
-                HIServices.kAXFocusedWindowChangedNotification,
-                HIServices.kAXMainWindowChangedNotification,
-                HIServices.kAXUIElementDestroyedNotification,
-                HIServices.kAXWindowMiniaturizedNotification,
-                HIServices.kAXWindowDeminiaturizedNotification,
-            ),
-        ):
+        if notification in AxNotifications.refresh_observers():
             self.refresh_observers()
         self.schedule_retile(
-            capture_row_weights=notification
-            in cast(
-                tuple[AxAttribute, ...],
-                (
-                    HIServices.kAXMovedNotification,
-                    HIServices.kAXResizedNotification,
-                    HIServices.kAXWindowMovedNotification,
-                    HIServices.kAXWindowResizedNotification,
-                ),
-            )
+            capture_row_weights=notification in AxNotifications.capture_row_weights()
         )
 
     def schedule_retile(self, *, capture_row_weights: bool = False) -> None:
@@ -2157,7 +2180,7 @@ class ClientArgs:
 
     @classmethod
     def add_parsers(cls, subparsers: Subparsers) -> None:
-        for command in FOCUS_MOVE_COMMANDS:
+        for command in CliCommands.FOCUS_MOVE:
             parser = subparsers.add_parser(command)
             _ = parser.add_argument(
                 "direction", choices=("left", "right", "up", "down")
@@ -2178,7 +2201,7 @@ class ClientArgs:
         _ = goto_desktop_parser.add_argument("number", type=int)
         cls.add_options(goto_desktop_parser)
 
-        for command in UTILITY_COMMANDS:
+        for command in CliCommands.UTILITY:
             parser = subparsers.add_parser(command)
             cls.add_options(parser)
 
@@ -2246,7 +2269,7 @@ class LaunchdPlistArgs:
     @classmethod
     def add_parser(cls, subparsers: Subparsers) -> None:
         parser = subparsers.add_parser("launchd-plist")
-        _ = parser.add_argument("--label", default=LAUNCHD_LABEL)
+        _ = parser.add_argument("--label", default=Launchd.LABEL)
         _ = parser.add_argument("--uv", type=Path, default=None)
         _ = parser.add_argument("--mwm-bin", type=Path, default=None)
         _ = parser.add_argument("--workdir", type=Path, default=None)
@@ -2275,7 +2298,7 @@ class LaunchdPlistArgs:
         cls,
         *,
         uv: Path | None = None,
-        label: str = LAUNCHD_LABEL,
+        label: str = Launchd.LABEL,
     ) -> LaunchdPlistArgs:
         home = Path.home()
         user = getpass.getuser()
@@ -2283,7 +2306,7 @@ class LaunchdPlistArgs:
         return cls(
             label=label,
             uv=uv or cls.default_uv_path(),
-            mwm_bin=home / LOCAL_BIN_NAME,
+            mwm_bin=home / Launchd.LOCAL_BIN_NAME,
             workdir=home,
             stdout_log=log_dir / f"mwm_{user}.out.log",
             stderr_log=log_dir / f"mwm_{user}.err.log",
