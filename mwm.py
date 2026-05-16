@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import importlib
 import json
 import math
@@ -2875,7 +2876,7 @@ class LaunchdPlistArgs:
         label: str = LAUNCHD_LABEL,
     ) -> LaunchdPlistArgs:
         home = Path.home()
-        user = os.environ.get("USER") or home.name
+        user = getpass.getuser()
         log_dir = Path("/") / "tmp"
         return cls(
             label=label,
