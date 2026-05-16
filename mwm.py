@@ -125,7 +125,7 @@ Quartz: DynamicObjC
 
 AxElement: TypeAlias = Hashable
 AxAttribute: TypeAlias = DynamicObjC | str
-AxAttributeValue: TypeAlias = None | bool | NumberLike | AxElement | DynamicObjC
+ObjCValue: TypeAlias = None | bool | NumberLike | Hashable | DynamicObjC
 AxCallback: TypeAlias = DynamicObjC
 RunLoopHandle: TypeAlias = DynamicObjC
 TimerHandle: TypeAlias = DynamicObjC
@@ -157,12 +157,16 @@ class CocoaRect(Protocol):
     size: CocoaSize
 
 
-QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxAttributeValue]
+QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, ObjCValue]
 
 
 def default_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    base = Path(runtime_dir) if runtime_dir else Path(tempfile.gettempdir())
+    base = (
+        Path(runtime_dir)
+        if runtime_dir is not None and runtime_dir != ""
+        else Path(tempfile.gettempdir())
+    )
     return base / f"mwm-{os.getuid()}.sock"
 
 
@@ -244,7 +248,7 @@ class Rect:
         >>> Rect._partition(100, (0.4, 0.4, 0.2))
         (40, 40, 20)
         """
-        if not weights:
+        if len(weights) == 0:
             return ()
         weight_sum = sum(weights)
         raw_sizes = tuple(total * weight / weight_sum for weight in weights)
@@ -497,7 +501,7 @@ class KeyChord:
     def parse(cls, value: str) -> KeyChord:
         raw_tokens = value.replace("+", "-").split("-")
         tokens = [token.strip().casefold() for token in raw_tokens if token.strip()]
-        if not tokens:
+        if len(tokens) == 0:
             msg = "key chord must not be empty"
             raise ValueError(msg)
         key = cls.normalise_key(tokens[-1])
@@ -521,7 +525,7 @@ class KeyChord:
         if isinstance(vk, int):
             return cls.VK_ALIASES.get(vk, f"vk:{vk}")
         char = getattr(key, "char", None)
-        if isinstance(char, str) and char:
+        if isinstance(char, str) and char != "":
             return cls.normalise_key(char)
         return None
 
@@ -740,9 +744,9 @@ class MacOS:
         raise RuntimeError(msg)
 
     @staticmethod
-    def ax_get(element: AxElement, attribute: AxAttribute) -> AxAttributeValue | None:
+    def ax_get(element: AxElement, attribute: AxAttribute) -> ObjCValue | None:
         error, value = cast(
-            tuple[AxAttributeValue, AxAttributeValue],
+            tuple[ObjCValue, ObjCValue],
             cast(
                 object,
                 HIServices.AXUIElementCopyAttributeValue(element, attribute, None),
@@ -753,9 +757,7 @@ class MacOS:
         return value
 
     @staticmethod
-    def ax_set(
-        element: AxElement, attribute: AxAttribute, value: AxAttributeValue
-    ) -> bool:
+    def ax_set(element: AxElement, attribute: AxAttribute, value: ObjCValue) -> bool:
         error = HIServices.AXUIElementSetAttributeValue(element, attribute, value)
         return error == HIServices.kAXErrorSuccess
 
@@ -767,7 +769,7 @@ class MacOS:
     @staticmethod
     def ax_pid(element: AxElement) -> int | None:
         error, pid = cast(
-            tuple[AxAttributeValue, NumberLike],
+            tuple[ObjCValue, NumberLike],
             cast(object, HIServices.AXUIElementGetPid(element, None)),
         )
         if error != HIServices.kAXErrorSuccess:
@@ -784,7 +786,7 @@ class MacOS:
         return bool(value)
 
     @staticmethod
-    def ax_point(value: AxAttributeValue) -> CocoaPoint | None:
+    def ax_point(value: ObjCValue) -> CocoaPoint | None:
         ok, point = cast(
             tuple[bool, CocoaPoint],
             cast(
@@ -797,7 +799,7 @@ class MacOS:
         return point
 
     @staticmethod
-    def ax_size(value: AxAttributeValue) -> CocoaSize | None:
+    def ax_size(value: ObjCValue) -> CocoaSize | None:
         ok, size = cast(
             tuple[bool, CocoaSize],
             cast(
@@ -866,7 +868,7 @@ class MacOS:
     @staticmethod
     def screens() -> tuple[ScreenInfo, ...]:
         screens = tuple(cast(Iterable[DynamicObjC], AppKit.NSScreen.screens()))
-        if not screens:
+        if len(screens) == 0:
             return ()
         main_screen = AppKit.NSScreen.mainScreen() or screens[0]
         main_screen_height = float(main_screen.frame().size.height)
@@ -955,7 +957,7 @@ class MacOS:
                 )
             )
             raw_windows = MacOS.ax_get(focused_app, HIServices.kAXWindowsAttribute)
-            if raw_windows:
+            if raw_windows is not None:
                 candidate_windows.extend(cast(Iterable[AxElement], raw_windows))
         for window in candidate_windows:
             if window is None:
@@ -1017,14 +1019,14 @@ class MacOS:
     @staticmethod
     def collect_windows() -> tuple[WindowInfo, ...]:
         screen_infos = MacOS.screens()
-        if not screen_infos:
+        if len(screen_infos) == 0:
             return ()
         visible_index = MacOS.visible_window_index()
         windows: list[WindowInfo] = []
         for pid in MacOS.running_pids():
             app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
             raw_windows = MacOS.ax_get(app, HIServices.kAXWindowsAttribute)
-            if not raw_windows:
+            if raw_windows is None:
                 continue
             for window in cast(Iterable[AxElement], raw_windows):
                 info = MacOS.window_info(
@@ -1167,7 +1169,7 @@ class LayoutState:
         for key in visible_keys:
             if key in known_keys:
                 continue
-            if not columns or len(columns) < config.max_column_count:
+            if len(columns) == 0 or len(columns) < config.max_column_count:
                 columns.append([key])
             else:
                 columns[-1].append(key)
@@ -1266,7 +1268,7 @@ class Ipc:
                 chunks: list[bytes] = []
                 while True:
                     chunk = client.recv(4096)
-                    if not chunk:
+                    if len(chunk) == 0:
                         break
                     chunks.append(chunk)
                     if b"\n" in chunk:
@@ -1276,7 +1278,7 @@ class Ipc:
                 ok=False, message=f"cannot reach daemon at {path}: {error}"
             )
         payload = b"".join(chunks).split(b"\n", maxsplit=1)[0]
-        if not payload:
+        if len(payload) == 0:
             return IpcResponse(ok=False, message="daemon returned an empty response")
         try:
             return IpcResponse.loads(payload.decode())
@@ -1324,7 +1326,7 @@ class WindowDaemon:
             observer: AxElement,
             element: AxElement,
             notification: str,
-            refcon: AxAttributeValue,
+            refcon: ObjCValue,
         ) -> None:
             self._ax_callback(observer, element, notification, refcon)
 
@@ -1452,7 +1454,7 @@ class WindowDaemon:
             print(f"{source}: {request_summary(request)} -> {message}", flush=True)
         return IpcResponse(ok=True, message=message)
 
-    def _tick(self, _timer: TimerHandle, _info: AxAttributeValue) -> None:
+    def _tick(self, _timer: TimerHandle, _info: ObjCValue) -> None:
         with self.lock:
             self._drain_ipc_calls()
             if not self.running:
@@ -1544,7 +1546,7 @@ class WindowDaemon:
     def _observe_app(self, *, pid: int) -> None:
         app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
         error, observer = cast(
-            tuple[AxAttributeValue, AxElement],
+            tuple[ObjCValue, AxElement],
             cast(
                 object,
                 HIServices.AXObserverCreate(pid, self.ax_callback, None),
@@ -1603,7 +1605,7 @@ class WindowDaemon:
         _observer: AxElement,
         _element: AxElement,
         notification: str,
-        _refcon: AxAttributeValue,
+        _refcon: ObjCValue,
     ) -> None:
         if notification in cast(
             tuple[AxAttribute, ...],
@@ -1878,7 +1880,10 @@ def layout_targets(
             column_frame.split_rows(
                 count=len(column),
                 weights=column_row_weights(
-                    column=column, row_weights_by_key=row_weights_by_key or {}
+                    column=column,
+                    row_weights_by_key=(
+                        row_weights_by_key if row_weights_by_key is not None else {}
+                    ),
                 ),
             ),
             strict=True,
@@ -1903,19 +1908,19 @@ def column_row_weights(
         and row_weights_by_key[key] > 0
         and math.isfinite(row_weights_by_key[key])
     ]
-    fallback = sum(known) / len(known) if known else 1.0
+    fallback = sum(known) / len(known) if len(known) > 0 else 1.0
     return tuple(row_weights_by_key.get(key, fallback) for key in column)
 
 
 def screen_for_frame(frame: Rect, screens: tuple[ScreenInfo, ...]) -> ScreenInfo | None:
-    if not screens:
+    if len(screens) == 0:
         return None
     containing = [
         screen
         for screen in screens
         if screen.frame.contains_point(x=frame.center_x, y=frame.center_y)
     ]
-    if containing:
+    if len(containing) > 0:
         return containing[0]
     return max(
         screens, key=lambda screen: screen.frame.intersection_area(frame), default=None
@@ -1969,7 +1974,7 @@ def select_focus_target(
     arranged: dict[str, list[list[WindowInfo]]],
 ) -> WindowInfo | None:
     columns = arranged.get(current.screen_key)
-    if not columns:
+    if columns is None or len(columns) == 0:
         return geometric_focus_target(
             current=current, direction=direction, candidates=()
         )
