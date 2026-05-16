@@ -1054,6 +1054,25 @@ class MacOS:
         if app_pid is None:
             app_pid = front_pid
         windows = MacOS.collect_windows()
+        candidate_windows = MacOS.focused_window_candidates(
+            system=system, focused_app=focused_app
+        )
+        for window in candidate_windows:
+            info = MacOS._focused_window_info(window, app_pid=app_pid, windows=windows)
+            if info is not None:
+                return info
+        if app_pid is None:
+            return None
+        return min(
+            (candidate for candidate in windows if candidate.pid == app_pid),
+            key=lambda candidate: candidate.order,
+            default=None,
+        )
+
+    @staticmethod
+    def focused_window_candidates(
+        *, system: AxElement, focused_app: AxElement | None
+    ) -> tuple[AxElement, ...]:
         candidate_windows: list[AxElement] = []
         system_focused_window = MacOS.ax_get(
             system, HIServices.kAXFocusedWindowAttribute
@@ -1072,17 +1091,7 @@ class MacOS:
             raw_windows = MacOS.ax_get(focused_app, HIServices.kAXWindowsAttribute)
             if raw_windows is not None:
                 candidate_windows.extend(cast(Iterable[AxElement], raw_windows))
-        for window in candidate_windows:
-            info = MacOS._focused_window_info(window, app_pid=app_pid, windows=windows)
-            if info is not None:
-                return info
-        if app_pid is None:
-            return None
-        return min(
-            (candidate for candidate in windows if candidate.pid == app_pid),
-            key=lambda candidate: candidate.order,
-            default=None,
-        )
+        return tuple(candidate_windows)
 
     @staticmethod
     def _focused_window_info(
