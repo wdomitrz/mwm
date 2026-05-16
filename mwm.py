@@ -887,6 +887,13 @@ class MacOS:
         return bool(value)
 
     @staticmethod
+    def ax_string(element: AxElement, attribute: AxAttribute) -> str:
+        value = MacOS.ax_get(element, attribute)
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
     def ax_point(value: ObjCValue) -> CocoaPoint | None:
         ok, point = cast(
             tuple[bool, CocoaPoint],
@@ -1110,7 +1117,7 @@ class MacOS:
         screen = screen_for_frame(frame, MacOS.screens())
         if screen is None:
             return None
-        title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
+        title = MacOS.ax_string(window, HIServices.kAXTitleAttribute)
         return MacOS._window_info_from_values(
             window=window,
             pid=pid,
@@ -1175,7 +1182,7 @@ class MacOS:
                 return None
         elif number not in visible_index.numbers_by_pid.get(pid, set()):
             return None
-        title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
+        title = MacOS.ax_string(window, HIServices.kAXTitleAttribute)
         return MacOS._window_info_from_values(
             window=window,
             pid=pid,
