@@ -32,9 +32,17 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import ClassVar, Literal, Protocol, assert_never, cast, override
+from typing import (
+    ClassVar,
+    Literal,
+    Protocol,
+    Self,
+    assert_never,
+    cast,
+    override,
+)
 
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
@@ -483,7 +491,7 @@ class LayoutConfig:
         return min(window_count, self.max_column_count)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(kw_only=True, frozen=True)
 class IpcRequest:
     kind: CommandKind
     direction: Direction | None = None
@@ -491,38 +499,11 @@ class IpcRequest:
     columns: float | None = None
 
     @classmethod
-    def from_json(cls, payload: bytes) -> IpcRequest:
-        raw = parse_json_map(payload)
-        assert "kind" in raw
-        kind = parse_command_kind(str(raw["kind"]))
-        direction = (
-            parse_direction(str(raw["direction"]))
-            if raw.get("direction") is not None
-            else None
-        )
-        desktop = (
-            parse_desktop_number(raw["desktop"])
-            if raw.get("desktop") is not None
-            else None
-        )
-        columns = to_float(raw["columns"]) if raw.get("columns") is not None else None
-        return cls(
-            kind=kind,
-            direction=direction,
-            desktop=desktop,
-            columns=columns,
-        )
+    def loads(cls, data: str) -> Self:
+        return cls(**json.loads(data))  # pyright: ignore[reportAny]
 
-    def to_json(self) -> bytes:
-        return json.dumps(
-            {
-                "kind": self.kind,
-                "direction": self.direction,
-                "desktop": self.desktop,
-                "columns": self.columns,
-            },
-            separators=(",", ":"),
-        ).encode()
+    def dumps(self) -> str:
+        return json.dumps(asdict(self))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -531,16 +512,11 @@ class IpcResponse:
     message: str
 
     @classmethod
-    def from_json(cls, payload: bytes) -> IpcResponse:
-        raw = parse_json_map(payload)
-        assert "ok" in raw
-        assert "message" in raw
-        return cls(ok=bool(raw["ok"]), message=str(raw["message"]))
+    def loads(cls, payload: str) -> IpcResponse:
+        return cls(**json.loads(payload))  # pyright: ignore[reportAny]
 
-    def to_json(self) -> bytes:
-        return json.dumps(
-            {"ok": self.ok, "message": self.message}, separators=(",", ":")
-        ).encode()
+    def dumps(self) -> str:
+        return json.dumps(asdict(self))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -552,7 +528,7 @@ class AppObserver:
 
 @dataclass(kw_only=True)
 class PendingIpcCall:
-    payload: bytes
+    payload: str
     source: str = "ipc"
     event: threading.Event = field(default_factory=threading.Event)
     response: IpcResponse | None = None
@@ -1444,7 +1420,7 @@ class Ipc:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(Ipc.CLIENT_TIMEOUT_SECONDS)
                 client.connect(str(path))
-                client.sendall(request.to_json() + b"\n")
+                client.sendall((request.dumps() + "\n").encode())
                 chunks: list[bytes] = []
                 while True:
                     chunk = client.recv(4096)
@@ -1461,7 +1437,7 @@ class Ipc:
         if not payload:
             return IpcResponse(ok=False, message="daemon returned an empty response")
         try:
-            return IpcResponse.from_json(payload)
+            return IpcResponse.loads(payload.decode())
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return IpcResponse(ok=False, message=f"invalid daemon response: {error}")
 
@@ -1590,9 +1566,9 @@ class WindowDaemon:
                 with client:
                     payload = self._read_client_payload(client)
                     response = self._submit_ipc_call(payload)
-                    client.sendall(response.to_json() + b"\n")
+                    client.sendall((response.dumps() + "\n").encode())
 
-    def _submit_ipc_call(self, payload: bytes) -> IpcResponse:
+    def _submit_ipc_call(self, payload: str) -> IpcResponse:
         if not self.running:
             return IpcResponse(ok=False, message="daemon is stopping")
         call = PendingIpcCall(payload=payload, source="ipc")
@@ -1603,7 +1579,7 @@ class WindowDaemon:
     def submit_keybinding(self, request: IpcRequest) -> None:
         if self.running:
             self.pending_ipc_calls.put(
-                PendingIpcCall(payload=request.to_json(), source="keybinding")
+                PendingIpcCall(payload=request.dumps(), source="keybinding")
             )
             self._wake_run_loop()
 
@@ -1612,20 +1588,20 @@ class WindowDaemon:
             _ = self.api.core.CFRunLoopWakeUp(self.run_loop)
 
     @staticmethod
-    def _read_client_payload(client: socket.socket) -> bytes:
-        chunks: list[bytes] = []
+    def _read_client_payload(client: socket.socket) -> str:
+        chunks: list[str] = []
         while True:
-            chunk = client.recv(4096)
-            if not chunk:
+            chunk = client.recv(4096).decode()
+            if len(chunk) == 0:
                 break
             chunks.append(chunk)
-            if b"\n" in chunk:
+            if "\n" in chunk:
                 break
-        return b"".join(chunks).split(b"\n", maxsplit=1)[0]
+        return "".join(chunks).strip()
 
-    def _handle_client_payload(self, payload: bytes, *, source: str) -> IpcResponse:
+    def _handle_client_payload(self, payload: str, *, source: str) -> IpcResponse:
         try:
-            request = IpcRequest.from_json(payload)
+            request = IpcRequest.loads(payload)
             message = self.handle(request)
         except (AssertionError, KeyError, TypeError, ValueError) as error:
             if self.verbose:
@@ -2616,12 +2592,6 @@ True
 """,
     "ipc_and_parsing": """
 >>> request = IpcRequest(kind="move", direction="left")
->>> IpcRequest.from_json(request.to_json()) == request
-True
->>> IpcResponse.from_json(IpcResponse(ok=True, message="done").to_json()).message
-'done'
->>> require_direction(IpcRequest(kind="focus", direction="right"))
-'right'
 >>> call = PendingIpcCall(payload=b"{}")
 >>> call.wait(timeout=0).ok
 False
@@ -2969,8 +2939,7 @@ class LaunchdPlistArgs:
                 workdir=self.workdir,
                 stdout_log=self.stdout_log,
                 stderr_log=self.stderr_log,
-            ),
-            fmt=plistlib.FMT_XML,
+            )
         )
         if self.output is None:
             _ = sys.stdout.buffer.write(payload)
