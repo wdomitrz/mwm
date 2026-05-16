@@ -629,6 +629,10 @@ class KeyChord:
         0x2D: "n",
         0x2E: "m",
         0x2F: ".",
+        0x7B: "left",
+        0x7C: "right",
+        0x7D: "down",
+        0x7E: "up",
     }
 
     @classmethod
@@ -699,10 +703,18 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
             "alt-j": "focus down",
             "alt-k": "focus up",
             "alt-l": "focus right",
+            "cmd-left": "focus left",
+            "cmd-down": "focus down",
+            "cmd-up": "focus up",
+            "cmd-right": "focus right",
             "shift-alt-h": "move left",
             "shift-alt-j": "move down",
             "shift-alt-k": "move up",
             "shift-alt-l": "move right",
+            "shift-cmd-left": "move left",
+            "shift-cmd-down": "move down",
+            "shift-cmd-up": "move up",
+            "shift-cmd-right": "move right",
             "alt-1": "goto-desktop 1",
             "alt-2": "goto-desktop 2",
             "alt-3": "goto-desktop 3",
@@ -2593,8 +2605,14 @@ ValueError: unknown direction: north
 >>> from types import SimpleNamespace
 >>> KeyChord.from_event_key(SimpleNamespace(vk=4, char="ķ"))
 'h'
+>>> KeyChord.from_event_key(SimpleNamespace(vk=123))
+'left'
 >>> KeyChord.parse("alt-h").matches(key="h", modifiers={"alt"})
 True
+>>> KeyChord.parse("cmd-left").matches(key="left", modifiers={"cmd"})
+True
+>>> [binding.request for binding in default_keybindings() if binding.chord == KeyChord.parse("shift-cmd-up")]
+[IpcRequest(kind='move', direction='up', desktop=None, columns=None)]
 >>> parse_binding_command("close")
 IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 >>> chrome = _Test.window("7:11", x=10, y=10, pid=7, number=11, order=0)
