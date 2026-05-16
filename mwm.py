@@ -48,6 +48,13 @@ from typing import (
     runtime_checkable,
 )
 
+import AppKit  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
+import CoreFoundation  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
+import HIServices  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
+import objc  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
+import Quartz  # pyright: ignore[reportMissingTypeStubs, reportAssignmentType]
+from pynput import keyboard  # pyright: ignore[reportAssignmentType]
+
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
 CommandKind = Literal[
@@ -127,6 +134,14 @@ class DynamicObjC(Protocol):
     def __float__(self) -> float: ...
     def __or__(self, other: object) -> DynamicObjC: ...
     def __ror__(self, other: object) -> DynamicObjC: ...
+
+
+AppKit: DynamicObjC
+CoreFoundation: DynamicObjC
+HIServices: DynamicObjC
+objc: DynamicObjC
+Quartz: DynamicObjC
+keyboard: DynamicObjC
 
 
 class AxElement(Protocol):
@@ -242,16 +257,6 @@ def default_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     base = Path(runtime_dir) if runtime_dir else Path(tempfile.gettempdir())
     return base / f"mwm-{os.getuid()}.sock"
-
-
-def import_keyboard() -> DynamicObjC:
-    try:
-        from pynput import keyboard  # noqa: PLC0415
-    except ImportError as error:
-        msg = "pynput is required for built-in keybindings; use --no-keybindings to run without it."
-        raise RuntimeError(msg) from error
-
-    return cast(DynamicObjC, keyboard)  # pyright: ignore[reportInvalidCast]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -840,7 +845,6 @@ class KeyBindingManager:
         self.listener: KeyboardListener | None = None
 
     def start(self) -> None:
-        keyboard = import_keyboard()
         listener = keyboard.Listener(
             on_press=self._on_press,
             on_release=self._on_release,
@@ -914,181 +918,159 @@ class KeyBindingManager:
         return False
 
 
-@dataclass(frozen=True, kw_only=True)
-class MacApi:
-    appkit: DynamicObjC
-    core: DynamicObjC
-    hiservices: DynamicObjC
-    objc: DynamicObjC
-    quartz: DynamicObjC
+AX_WINDOW_NUMBER_ATTRIBUTE: str = "AXWindowNumber"
 
-    AX_WINDOW_NUMBER_ATTRIBUTE: ClassVar[str] = "AXWindowNumber"
 
-    @classmethod
-    def load(cls) -> MacApi:
-        try:
-            import AppKit  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-            import CoreFoundation  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-            import HIServices  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-            import objc  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-            import Quartz  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        except ImportError as error:
-            msg = (
-                "mwm requires PyObjC on macOS. Install the script dependencies with uv, "
-                "pipx, or pip on the machine that will run the daemon."
-            )
-            raise RuntimeError(msg) from error
-        return cls(
-            appkit=cast(DynamicObjC, AppKit),  # pyright: ignore[reportInvalidCast]
-            core=cast(DynamicObjC, CoreFoundation),  # pyright: ignore[reportInvalidCast]
-            hiservices=cast(DynamicObjC, HIServices),  # pyright: ignore[reportInvalidCast]
-            objc=cast(DynamicObjC, objc),  # pyright: ignore[reportInvalidCast]
-            quartz=cast(DynamicObjC, Quartz),  # pyright: ignore[reportInvalidCast]
-        )
-
-    def ensure_accessibility(self) -> None:
-        if bool(self.hiservices.AXIsProcessTrusted()):
+class MacOS:
+    @staticmethod
+    def ensure_accessibility() -> None:
+        if bool(HIServices.AXIsProcessTrusted()):
             return
-        prompt_key = self.hiservices.kAXTrustedCheckOptionPrompt
-        _trusted = self.hiservices.AXIsProcessTrustedWithOptions({prompt_key: True})
+        prompt_key = HIServices.kAXTrustedCheckOptionPrompt
+        _trusted = HIServices.AXIsProcessTrustedWithOptions({prompt_key: True})
         msg = "Accessibility permission is required; grant it in System Settings and start the daemon again."
         raise RuntimeError(msg)
 
-    def ax_get(self, element: AxElement, attribute: AxAttribute) -> AxRawValue | None:
+    @staticmethod
+    def ax_get(element: AxElement, attribute: AxAttribute) -> AxRawValue | None:
         result = AxCopyValue.parse(
             cast(
                 AxTuple,
                 cast(
                     object,
-                    self.hiservices.AXUIElementCopyAttributeValue(
-                        element, attribute, None
-                    ),
+                    HIServices.AXUIElementCopyAttributeValue(element, attribute, None),
                 ),
             ),
         )
-        if result.error != self.hiservices.kAXErrorSuccess:
+        if result.error != HIServices.kAXErrorSuccess:
             return None
         return result.value
 
-    def ax_set(
-        self, element: AxElement, attribute: AxAttribute, value: AxRawValue
-    ) -> bool:
-        error = self.hiservices.AXUIElementSetAttributeValue(element, attribute, value)
-        return error == self.hiservices.kAXErrorSuccess
+    @staticmethod
+    def ax_set(element: AxElement, attribute: AxAttribute, value: AxRawValue) -> bool:
+        error = HIServices.AXUIElementSetAttributeValue(element, attribute, value)
+        return error == HIServices.kAXErrorSuccess
 
-    def ax_action(self, element: AxElement, action: AxAttribute) -> bool:
-        error = self.hiservices.AXUIElementPerformAction(element, action)
-        return error == self.hiservices.kAXErrorSuccess
+    @staticmethod
+    def ax_action(element: AxElement, action: AxAttribute) -> bool:
+        error = HIServices.AXUIElementPerformAction(element, action)
+        return error == HIServices.kAXErrorSuccess
 
-    def ax_pid(self, element: AxElement) -> int | None:
+    @staticmethod
+    def ax_pid(element: AxElement) -> int | None:
         result = AxCopyValue.parse(
             cast(
                 AxTuple,
-                cast(object, self.hiservices.AXUIElementGetPid(element, None)),
+                cast(object, HIServices.AXUIElementGetPid(element, None)),
             )
         )
-        if result.error != self.hiservices.kAXErrorSuccess:
+        if result.error != HIServices.kAXErrorSuccess:
             return None
-        else:
-            return int(cast(NumberLike, result.value))
+        return int(cast(NumberLike, result.value))
 
+    @staticmethod
     def ax_bool(
-        self, element: AxElement, attribute: AxAttribute, *, default: bool = False
+        element: AxElement, attribute: AxAttribute, *, default: bool = False
     ) -> bool:
-        value = self.ax_get(element, attribute)
+        value = MacOS.ax_get(element, attribute)
         if value is None:
             return default
-        else:
-            return bool(value)
+        return bool(value)
 
-    def ax_point(self, value: AxRawValue) -> AxPoint | None:
+    @staticmethod
+    def ax_point(value: AxRawValue) -> AxPoint | None:
         result = AxValue.parse(
             cast(
                 AxTuple,
                 cast(
                     object,
-                    self.hiservices.AXValueGetValue(
-                        value, self.hiservices.kAXValueTypeCGPoint, None
+                    HIServices.AXValueGetValue(
+                        value, HIServices.kAXValueTypeCGPoint, None
                     ),
                 ),
             ),
         )
         if not result.ok:
             return None
-        else:
-            return AxPoint.parse(cast(AxPointSource, result.value))
+        return AxPoint.parse(cast(AxPointSource, result.value))
 
-    def ax_size(self, value: AxRawValue) -> AxSize | None:
+    @staticmethod
+    def ax_size(value: AxRawValue) -> AxSize | None:
         result = AxValue.parse(
             cast(
                 AxTuple,
                 cast(
                     object,
-                    self.hiservices.AXValueGetValue(
-                        value, self.hiservices.kAXValueTypeCGSize, None
+                    HIServices.AXValueGetValue(
+                        value, HIServices.kAXValueTypeCGSize, None
                     ),
                 ),
             ),
         )
         if not result.ok:
             return None
-        else:
-            return AxSize.parse(cast(AxSizeSource, result.value))
+        return AxSize.parse(cast(AxSizeSource, result.value))
 
-    def ax_frame(self, window: AxElement) -> Rect | None:
-        position_value = self.ax_get(window, self.hiservices.kAXPositionAttribute)
-        size_value = self.ax_get(window, self.hiservices.kAXSizeAttribute)
+    @staticmethod
+    def ax_frame(window: AxElement) -> Rect | None:
+        position_value = MacOS.ax_get(window, HIServices.kAXPositionAttribute)
+        size_value = MacOS.ax_get(window, HIServices.kAXSizeAttribute)
         if position_value is None or size_value is None:
             return None
-        position = self.ax_point(position_value)
-        size = self.ax_size(size_value)
+        position = MacOS.ax_point(position_value)
+        size = MacOS.ax_size(size_value)
         if position is None or size is None:
             return None
         return Rect.from_ax_values(position=position, size=size)
 
-    def set_frame(self, window: WindowInfo, frame: Rect) -> None:
-        point = self.hiservices.AXValueCreate(
-            self.hiservices.kAXValueTypeCGPoint, frame.as_ax_position()
+    @staticmethod
+    def set_frame(window: WindowInfo, frame: Rect) -> None:
+        point = HIServices.AXValueCreate(
+            HIServices.kAXValueTypeCGPoint, frame.as_ax_position()
         )
-        size = self.hiservices.AXValueCreate(
-            self.hiservices.kAXValueTypeCGSize, frame.as_ax_size()
+        size = HIServices.AXValueCreate(
+            HIServices.kAXValueTypeCGSize, frame.as_ax_size()
         )
-        _ = self.ax_set(window.ax, self.hiservices.kAXPositionAttribute, point)
-        _ = self.ax_set(window.ax, self.hiservices.kAXSizeAttribute, size)
+        _ = MacOS.ax_set(window.ax, HIServices.kAXPositionAttribute, point)
+        _ = MacOS.ax_set(window.ax, HIServices.kAXSizeAttribute, size)
 
-    def focus_window(self, window: WindowInfo) -> None:
-        app = cast(AxElement, self.hiservices.AXUIElementCreateApplication(window.pid))
-        _ = self.ax_set(app, self.hiservices.kAXFrontmostAttribute, value=True)
-        _ = self.ax_set(window.ax, self.hiservices.kAXMainAttribute, value=True)
-        _ = self.ax_set(window.ax, self.hiservices.kAXFocusedAttribute, value=True)
-        _ = self.ax_action(window.ax, self.hiservices.kAXRaiseAction)
+    @staticmethod
+    def focus_window(window: WindowInfo) -> None:
+        app = cast(AxElement, HIServices.AXUIElementCreateApplication(window.pid))
+        _ = MacOS.ax_set(app, HIServices.kAXFrontmostAttribute, value=True)
+        _ = MacOS.ax_set(window.ax, HIServices.kAXMainAttribute, value=True)
+        _ = MacOS.ax_set(window.ax, HIServices.kAXFocusedAttribute, value=True)
+        _ = MacOS.ax_action(window.ax, HIServices.kAXRaiseAction)
 
-    def close_window(self, window: WindowInfo) -> bool:
-        button = self.ax_get(window.ax, self.hiservices.kAXCloseButtonAttribute)
+    @staticmethod
+    def close_window(window: WindowInfo) -> bool:
+        button = MacOS.ax_get(window.ax, HIServices.kAXCloseButtonAttribute)
         if button is None:
             return False
-        return self.ax_action(button, self.hiservices.kAXPressAction)
+        return MacOS.ax_action(button, HIServices.kAXPressAction)
 
-    def switch_desktop(self, number: int) -> bool:
+    @staticmethod
+    def switch_desktop(number: int) -> bool:
         key_code = DESKTOP_KEY_CODES.get(number)
         if key_code is None:
             return False
         for is_down in (True, False):
             event = cast(
                 DynamicObjC | None,
-                self.quartz.CGEventCreateKeyboardEvent(None, key_code, is_down),
+                Quartz.CGEventCreateKeyboardEvent(None, key_code, is_down),
             )
             if event is None:
                 return False
-            _ = self.quartz.CGEventSetFlags(event, self.quartz.kCGEventFlagMaskControl)
-            _ = self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, event)
+            _ = Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskControl)
+            _ = Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
         return True
 
-    def screens(self) -> tuple[ScreenInfo, ...]:
-        screens = tuple(cast(Iterable[DynamicObjC], self.appkit.NSScreen.screens()))
+    @staticmethod
+    def screens() -> tuple[ScreenInfo, ...]:
+        screens = tuple(cast(Iterable[DynamicObjC], AppKit.NSScreen.screens()))
         if not screens:
             return ()
-        main_screen = self.appkit.NSScreen.mainScreen() or screens[0]
+        main_screen = AppKit.NSScreen.mainScreen() or screens[0]
         main_screen_height = float(main_screen.frame().size.height)
         result: list[ScreenInfo] = []
         for index, screen in enumerate(screens):
@@ -1099,8 +1081,9 @@ class MacApi:
             result.append(ScreenInfo(key=f"{index}:{frame.as_key()}", frame=frame))
         return tuple(result)
 
-    def running_pids(self) -> tuple[int, ...]:
-        desktop = self.appkit.NSWorkspace.sharedWorkspace()
+    @staticmethod
+    def running_pids() -> tuple[int, ...]:
+        desktop = AppKit.NSWorkspace.sharedWorkspace()
         pids: list[int] = []
         for app in cast(Iterable[DynamicObjC], desktop.runningApplications()):
             pid = int(app.processIdentifier())
@@ -1108,10 +1091,11 @@ class MacApi:
                 pids.append(pid)
         return tuple(sorted(set(pids)))
 
-    def frontmost_pid(self) -> int | None:
+    @staticmethod
+    def frontmost_pid() -> int | None:
         raw_app = cast(
             DynamicObjC | None,
-            self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication(),
+            AppKit.NSWorkspace.sharedWorkspace().frontmostApplication(),
         )
         if raw_app is None:
             return None
@@ -1120,34 +1104,33 @@ class MacApi:
             return None
         return pid
 
-    def visible_window_index(self) -> VisibleWindowIndex:
+    @staticmethod
+    def visible_window_index() -> VisibleWindowIndex:
         options = (
-            self.quartz.kCGWindowListOptionOnScreenOnly
-            | self.quartz.kCGWindowListExcludeDesktopElements
+            Quartz.kCGWindowListOptionOnScreenOnly
+            | Quartz.kCGWindowListExcludeDesktopElements
         )
         raw_windows = cast(
             Iterable[QuartzWindowInfo],
-            self.quartz.CGWindowListCopyWindowInfo(
-                options, self.quartz.kCGNullWindowID
-            ),
+            Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID),
         )
         numbers_by_pid: dict[int, set[int]] = {}
         order_by_pid_number: dict[tuple[int, int], int] = {}
         frames_by_pid: dict[int, list[tuple[int, Rect]]] = {}
         for order, raw in enumerate(raw_windows):
-            if int(cast(NumberLike, raw.get(self.quartz.kCGWindowLayer, 1))) != 0:
+            if int(cast(NumberLike, raw.get(Quartz.kCGWindowLayer, 1))) != 0:
                 continue
-            if not bool(raw.get(self.quartz.kCGWindowIsOnscreen, False)):
+            if not bool(raw.get(Quartz.kCGWindowIsOnscreen, False)):
                 continue
-            alpha = float(cast(NumberLike, raw.get(self.quartz.kCGWindowAlpha, 1.0)))
+            alpha = float(cast(NumberLike, raw.get(Quartz.kCGWindowAlpha, 1.0)))
             if alpha <= 0:
                 continue
-            pid = int(cast(NumberLike, raw.get(self.quartz.kCGWindowOwnerPID, 0)))
-            number = int(cast(NumberLike, raw.get(self.quartz.kCGWindowNumber, 0)))
+            pid = int(cast(NumberLike, raw.get(Quartz.kCGWindowOwnerPID, 0)))
+            number = int(cast(NumberLike, raw.get(Quartz.kCGWindowNumber, 0)))
             if pid > 0 and number > 0:
                 numbers_by_pid.setdefault(pid, set()).add(number)
                 order_by_pid_number[(pid, number)] = order
-                bounds = raw.get(self.quartz.kCGWindowBounds)
+                bounds = raw.get(Quartz.kCGWindowBounds)
                 if isinstance(bounds, Mapping):
                     frame = Rect.from_quartz_bounds(bounds)
                     if frame is not None:
@@ -1160,34 +1143,35 @@ class MacApi:
             },
         )
 
-    def focused_window(self) -> WindowInfo | None:
-        system = cast(AxElement, self.hiservices.AXUIElementCreateSystemWide())
-        app = self.ax_get(system, self.hiservices.kAXFocusedApplicationAttribute)
-        frontmost_pid = self.frontmost_pid()
-        if app is None and frontmost_pid is not None:
-            app = self.hiservices.AXUIElementCreateApplication(frontmost_pid)
+    @staticmethod
+    def focused_window() -> WindowInfo | None:
+        system = cast(AxElement, HIServices.AXUIElementCreateSystemWide())
+        app = MacOS.ax_get(system, HIServices.kAXFocusedApplicationAttribute)
+        front_pid = MacOS.frontmost_pid()
+        if app is None and front_pid is not None:
+            app = HIServices.AXUIElementCreateApplication(front_pid)
         focused_app = cast(AxElement | None, app)
-        app_pid = self.ax_pid(focused_app) if focused_app is not None else None
+        app_pid = MacOS.ax_pid(focused_app) if focused_app is not None else None
         if app_pid is None:
-            app_pid = frontmost_pid
-        windows = self.collect_windows()
+            app_pid = front_pid
+        windows = MacOS.collect_windows()
         candidate_windows: list[AxElement | None] = [
-            self.ax_get(system, self.hiservices.kAXFocusedWindowAttribute)
+            MacOS.ax_get(system, HIServices.kAXFocusedWindowAttribute)
         ]
         if focused_app is not None:
             candidate_windows.extend(
                 (
-                    self.ax_get(focused_app, self.hiservices.kAXFocusedWindowAttribute),
-                    self.ax_get(focused_app, self.hiservices.kAXMainWindowAttribute),
+                    MacOS.ax_get(focused_app, HIServices.kAXFocusedWindowAttribute),
+                    MacOS.ax_get(focused_app, HIServices.kAXMainWindowAttribute),
                 )
             )
-            raw_windows = self.ax_get(focused_app, self.hiservices.kAXWindowsAttribute)
+            raw_windows = MacOS.ax_get(focused_app, HIServices.kAXWindowsAttribute)
             if raw_windows:
                 candidate_windows.extend(cast(Iterable[AxElement], raw_windows))
         for window in candidate_windows:
             if window is None:
                 continue
-            info = self._focused_window_info(window, app_pid=app_pid, windows=windows)
+            info = MacOS._focused_window_info(window, app_pid=app_pid, windows=windows)
             if info is not None:
                 return info
         if app_pid is None:
@@ -1198,17 +1182,17 @@ class MacApi:
             default=None,
         )
 
+    @staticmethod
     def _focused_window_info(
-        self,
         window: AxElement,
         *,
         app_pid: int | None,
         windows: tuple[WindowInfo, ...],
     ) -> WindowInfo | None:
-        pid = self.ax_pid(window)
+        pid = MacOS.ax_pid(window)
         if pid is None:
             pid = app_pid
-        number = self.window_number(window)
+        number = MacOS.window_number(window)
         for candidate in windows:
             if (
                 number is not None
@@ -1216,7 +1200,7 @@ class MacApi:
                 and candidate.window_number == number
             ):
                 return candidate
-        frame = self.ax_frame(window)
+        frame = MacOS.ax_frame(window)
         if pid is None or frame is None:
             return None
         nearest = min(
@@ -1228,11 +1212,11 @@ class MacApi:
             return nearest
         if not frame.valid_window_size:
             return None
-        screen = screen_for_frame(frame, self.screens())
+        screen = screen_for_frame(frame, MacOS.screens())
         if screen is None:
             return None
-        title = str(self.ax_get(window, self.hiservices.kAXTitleAttribute) or "")
-        return self._window_info_from_values(
+        title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
+        return MacOS._window_info_from_values(
             window=window,
             pid=pid,
             title=title,
@@ -1242,30 +1226,31 @@ class MacApi:
             order=None,
         )
 
-    def collect_windows(self) -> tuple[WindowInfo, ...]:
-        screens = self.screens()
-        if not screens:
+    @staticmethod
+    def collect_windows() -> tuple[WindowInfo, ...]:
+        screen_infos = MacOS.screens()
+        if not screen_infos:
             return ()
-        visible_index = self.visible_window_index()
+        visible_index = MacOS.visible_window_index()
         windows: list[WindowInfo] = []
-        for pid in self.running_pids():
-            app = cast(AxElement, self.hiservices.AXUIElementCreateApplication(pid))
-            raw_windows = self.ax_get(app, self.hiservices.kAXWindowsAttribute)
+        for pid in MacOS.running_pids():
+            app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
+            raw_windows = MacOS.ax_get(app, HIServices.kAXWindowsAttribute)
             if not raw_windows:
                 continue
             for window in cast(Iterable[AxElement], raw_windows):
-                info = self.window_info(
+                info = MacOS.window_info(
                     window,
                     pid=pid,
-                    screens=screens,
+                    screens=screen_infos,
                     visible_index=visible_index,
                 )
                 if info is not None:
                     windows.append(info)
         return tuple(sorted(windows, key=window_sort_key))
 
+    @staticmethod
     def window_info(
-        self,
         window: AxElement,
         *,
         pid: int,
@@ -1273,28 +1258,28 @@ class MacApi:
         visible_index: VisibleWindowIndex,
     ) -> WindowInfo | None:
         if (
-            self.ax_get(window, self.hiservices.kAXRoleAttribute)
-            != self.hiservices.kAXWindowRole
+            MacOS.ax_get(window, HIServices.kAXRoleAttribute)
+            != HIServices.kAXWindowRole
         ):
             return None
         if (
-            self.ax_get(window, self.hiservices.kAXSubroleAttribute)
-            != self.hiservices.kAXStandardWindowSubrole
+            MacOS.ax_get(window, HIServices.kAXSubroleAttribute)
+            != HIServices.kAXStandardWindowSubrole
         ):
             return None
-        if self.ax_bool(window, self.hiservices.kAXMinimizedAttribute):
+        if MacOS.ax_bool(window, HIServices.kAXMinimizedAttribute):
             return None
-        frame = self.ax_frame(window)
+        frame = MacOS.ax_frame(window)
         if frame is None or not frame.valid_window_size:
             return None
         screen = screen_for_frame(frame, screens)
         if screen is None:
             return None
-        number = self.window_number(window)
+        number = MacOS.window_number(window)
         if not visible_index.contains(pid=pid, number=number, frame=frame):
             return None
-        title = str(self.ax_get(window, self.hiservices.kAXTitleAttribute) or "")
-        return self._window_info_from_values(
+        title = str(MacOS.ax_get(window, HIServices.kAXTitleAttribute) or "")
+        return MacOS._window_info_from_values(
             window=window,
             pid=pid,
             title=title,
@@ -1304,8 +1289,8 @@ class MacApi:
             order=None,
         )
 
+    @staticmethod
     def _window_info_from_values(
-        self,
         *,
         window: AxElement,
         pid: int,
@@ -1315,7 +1300,7 @@ class MacApi:
         number: int | None,
         order: int | None,
     ) -> WindowInfo:
-        stable_id = self.window_stable_id(window)
+        stable_id = MacOS.window_stable_id(window)
         resolved_order = order if order is not None else number or stable_id
         key = f"{pid}:{number}" if number is not None else f"{pid}:fallback:{stable_id}"
         return WindowInfo(
@@ -1329,8 +1314,9 @@ class MacApi:
             order=resolved_order,
         )
 
-    def window_number(self, window: AxElement) -> int | None:
-        value = self.ax_get(window, self.AX_WINDOW_NUMBER_ATTRIBUTE)
+    @staticmethod
+    def window_number(window: AxElement) -> int | None:
+        value = MacOS.ax_get(window, AX_WINDOW_NUMBER_ATTRIBUTE)
         if value is None:
             return None
         try:
@@ -1338,8 +1324,9 @@ class MacApi:
         except (TypeError, ValueError):
             return None
 
-    def window_stable_id(self, window: AxElement) -> int:
-        return int(self.core.CFHash(window))
+    @staticmethod
+    def window_stable_id(window: AxElement) -> int:
+        return int(CoreFoundation.CFHash(window))
 
 
 @dataclass(kw_only=True)
@@ -1532,19 +1519,17 @@ class WindowDaemon:
         self,
         *,
         config: LayoutConfig,
-        api: MacApi,
         keybindings: tuple[KeyBinding, ...] | None = None,
         verbose: bool = False,
     ) -> None:
         self.config: LayoutConfig = config
-        self.api: MacApi = api
         self.verbose: bool = verbose
         self.state: LayoutState = LayoutState()
         self.observers: dict[int, AppObserver] = {}
         self.observed_windows: set[str] = set()
         self.lock: threading.RLock = threading.RLock()
         self.pending_ipc_calls: queue.Queue[PendingIpcCall] = queue.Queue()
-        self.ax_callback: AxCallback = self._make_ax_callback(api=api)
+        self.ax_callback: AxCallback = self._make_ax_callback()
         self.keybinding_manager: KeyBindingManager | None = (
             KeyBindingManager(bindings=keybindings, submit=self.submit_keybinding)
             if keybindings is not None
@@ -1559,7 +1544,7 @@ class WindowDaemon:
         self.ignore_events_until: float = 0.0
         self.run_loop: RunLoopHandle | None = None
 
-    def _make_ax_callback(self, *, api: MacApi) -> AxCallback:
+    def _make_ax_callback(self) -> AxCallback:
         def callback(
             observer: AxElement,
             element: AxElement,
@@ -1568,12 +1553,12 @@ class WindowDaemon:
         ) -> None:
             self._ax_callback(observer, element, notification, refcon)
 
-        return api.objc.callbackFor(api.hiservices.AXObserverCreate)(callback)
+        return objc.callbackFor(HIServices.AXObserverCreate)(callback)
 
     def run(self) -> int:
-        self.api.ensure_accessibility()
+        MacOS.ensure_accessibility()
         self.running = True
-        self.run_loop = self.api.core.CFRunLoopGetCurrent()
+        self.run_loop = CoreFoundation.CFRunLoopGetCurrent()
         self._install_signal_handlers()
         self._start_ipc()
         if self.keybinding_manager is not None:
@@ -1583,7 +1568,7 @@ class WindowDaemon:
         if self.config.poll_seconds != "disabled":
             self.next_periodic_at = time.monotonic() + self.config.poll_seconds
         self._install_tick_timer()
-        _ = self.api.core.CFRunLoopRun()
+        _ = CoreFoundation.CFRunLoopRun()
         self.running = False
         self._cleanup()
         return 0
@@ -1597,8 +1582,8 @@ class WindowDaemon:
 
     def stop(self) -> None:
         self.running = False
-        run_loop = self.run_loop or self.api.core.CFRunLoopGetCurrent()
-        _ = self.api.core.CFRunLoopStop(run_loop)
+        run_loop = self.run_loop or CoreFoundation.CFRunLoopGetCurrent()
+        _ = CoreFoundation.CFRunLoopStop(run_loop)
 
     def _start_ipc(self) -> None:
         socket_path = self.config.socket_path
@@ -1614,20 +1599,20 @@ class WindowDaemon:
         self.ipc_thread = thread
 
     def _install_tick_timer(self) -> None:
-        run_loop = self.run_loop or self.api.core.CFRunLoopGetCurrent()
-        self.tick_timer = self.api.core.CFRunLoopTimerCreate(
+        run_loop = self.run_loop or CoreFoundation.CFRunLoopGetCurrent()
+        self.tick_timer = CoreFoundation.CFRunLoopTimerCreate(
             None,
-            float(self.api.core.CFAbsoluteTimeGetCurrent()) + self.TICK_SECONDS,
+            float(CoreFoundation.CFAbsoluteTimeGetCurrent()) + self.TICK_SECONDS,
             self.TICK_SECONDS,
             0,
             0,
             self._tick,
             None,
         )
-        _ = self.api.core.CFRunLoopAddTimer(
+        _ = CoreFoundation.CFRunLoopAddTimer(
             run_loop,
             self.tick_timer,
-            self.api.core.kCFRunLoopCommonModes,
+            CoreFoundation.kCFRunLoopCommonModes,
         )
 
     def _serve_ipc(self) -> None:
@@ -1666,7 +1651,7 @@ class WindowDaemon:
 
     def _wake_run_loop(self) -> None:
         if self.run_loop is not None:
-            _ = self.api.core.CFRunLoopWakeUp(self.run_loop)
+            _ = CoreFoundation.CFRunLoopWakeUp(self.run_loop)
 
     @staticmethod
     def _read_client_payload(client: socket.socket) -> str:
@@ -1754,7 +1739,7 @@ class WindowDaemon:
                     assert_never(request.kind)
 
     def status(self) -> str:
-        windows = self.api.collect_windows()
+        windows = MacOS.collect_windows()
         poll = (
             "disabled"
             if self.config.poll_seconds == "disabled"
@@ -1764,13 +1749,13 @@ class WindowDaemon:
 
     def refresh_observers(self) -> None:
         with self.lock:
-            running_pids = set(self.api.running_pids())
+            active_pids = set(MacOS.running_pids())
             for pid in tuple(self.observers):
-                if pid not in running_pids:
+                if pid not in active_pids:
                     del self.observers[pid]
-        for pid in sorted(running_pids - set(self.observers)):
+        for pid in sorted(active_pids - set(self.observers)):
             self._observe_app(pid=pid)
-            windows = self.api.collect_windows()
+            windows = MacOS.collect_windows()
             self.observed_windows.intersection_update(
                 {window.key for window in windows}
             )
@@ -1778,31 +1763,29 @@ class WindowDaemon:
                 self._observe_window(window)
 
     def _observe_app(self, *, pid: int) -> None:
-        app = cast(AxElement, self.api.hiservices.AXUIElementCreateApplication(pid))
+        app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
         result = AxCopyValue.parse(
             cast(
                 AxTuple,
                 cast(
                     object,
-                    self.api.hiservices.AXObserverCreate(
-                        pid, self.ax_callback, None
-                    ),
+                    HIServices.AXObserverCreate(pid, self.ax_callback, None),
                 ),
             )
         )
-        if result.error != self.api.hiservices.kAXErrorSuccess:
+        if result.error != HIServices.kAXErrorSuccess:
             return
         observer = cast(AxElement, result.value)
         self.observers[pid] = AppObserver(pid=pid, app=app, observer=observer)
-        _ = self.api.core.CFRunLoopAddSource(
-            self.run_loop or self.api.core.CFRunLoopGetCurrent(),
-            self.api.hiservices.AXObserverGetRunLoopSource(observer),
-            self.api.core.kCFRunLoopCommonModes,
+        _ = CoreFoundation.CFRunLoopAddSource(
+            self.run_loop or CoreFoundation.CFRunLoopGetCurrent(),
+            HIServices.AXObserverGetRunLoopSource(observer),
+            CoreFoundation.kCFRunLoopCommonModes,
         )
         for notification in (
-            self.api.hiservices.kAXWindowCreatedNotification,
-            self.api.hiservices.kAXFocusedWindowChangedNotification,
-            self.api.hiservices.kAXMainWindowChangedNotification,
+            HIServices.kAXWindowCreatedNotification,
+            HIServices.kAXFocusedWindowChangedNotification,
+            HIServices.kAXMainWindowChangedNotification,
         ):
             self._add_notification(pid=pid, element=app, notification=notification)
 
@@ -1811,13 +1794,13 @@ class WindowDaemon:
         if observer is None or window.key in self.observed_windows:
             return
         for notification in (
-            self.api.hiservices.kAXMovedNotification,
-            self.api.hiservices.kAXResizedNotification,
-            self.api.hiservices.kAXWindowMovedNotification,
-            self.api.hiservices.kAXWindowResizedNotification,
-            self.api.hiservices.kAXUIElementDestroyedNotification,
-            self.api.hiservices.kAXWindowMiniaturizedNotification,
-            self.api.hiservices.kAXWindowDeminiaturizedNotification,
+            HIServices.kAXMovedNotification,
+            HIServices.kAXResizedNotification,
+            HIServices.kAXWindowMovedNotification,
+            HIServices.kAXWindowResizedNotification,
+            HIServices.kAXUIElementDestroyedNotification,
+            HIServices.kAXWindowMiniaturizedNotification,
+            HIServices.kAXWindowDeminiaturizedNotification,
         ):
             self._add_notification(
                 pid=window.pid, element=window.ax, notification=notification
@@ -1830,12 +1813,12 @@ class WindowDaemon:
         observer = self.observers.get(pid)
         if observer is None:
             return
-        error = self.api.hiservices.AXObserverAddNotification(
+        error = HIServices.AXObserverAddNotification(
             observer.observer, element, notification, None
         )
         if error in (
-            self.api.hiservices.kAXErrorSuccess,
-            self.api.hiservices.kAXErrorNotificationAlreadyRegistered,
+            HIServices.kAXErrorSuccess,
+            HIServices.kAXErrorNotificationAlreadyRegistered,
         ):
             return
 
@@ -1849,12 +1832,12 @@ class WindowDaemon:
         if notification in cast(
             tuple[AxNotification, ...],
             (
-                self.api.hiservices.kAXWindowCreatedNotification,
-                self.api.hiservices.kAXFocusedWindowChangedNotification,
-                self.api.hiservices.kAXMainWindowChangedNotification,
-                self.api.hiservices.kAXUIElementDestroyedNotification,
-                self.api.hiservices.kAXWindowMiniaturizedNotification,
-                self.api.hiservices.kAXWindowDeminiaturizedNotification,
+                HIServices.kAXWindowCreatedNotification,
+                HIServices.kAXFocusedWindowChangedNotification,
+                HIServices.kAXMainWindowChangedNotification,
+                HIServices.kAXUIElementDestroyedNotification,
+                HIServices.kAXWindowMiniaturizedNotification,
+                HIServices.kAXWindowDeminiaturizedNotification,
             ),
         ):
             self.refresh_observers()
@@ -1863,10 +1846,10 @@ class WindowDaemon:
             in cast(
                 tuple[AxNotification, ...],
                 (
-                    self.api.hiservices.kAXMovedNotification,
-                    self.api.hiservices.kAXResizedNotification,
-                    self.api.hiservices.kAXWindowMovedNotification,
-                    self.api.hiservices.kAXWindowResizedNotification,
+                    HIServices.kAXMovedNotification,
+                    HIServices.kAXResizedNotification,
+                    HIServices.kAXWindowMovedNotification,
+                    HIServices.kAXWindowResizedNotification,
                 ),
             )
         )
@@ -1887,19 +1870,19 @@ class WindowDaemon:
     def retile(self) -> None:
         with self.lock:
             self.ignore_events_until = time.monotonic() + self.EVENT_QUIET_SECONDS
-            windows = self.api.collect_windows()
+            windows = MacOS.collect_windows()
             windows_by_key = {window.key: window for window in windows}
-            screens = {screen.key: screen for screen in self.api.screens()}
+            screen_infos = {screen.key: screen for screen in MacOS.screens()}
             grouped_windows = group_windows_by_screen(windows)
             self.state.keep_only(
                 visible_keys=set(windows_by_key),
-                visible_screen_keys=set(screens),
+                visible_screen_keys=set(screen_infos),
             )
             if self.capture_row_weights_at_retile:
                 self.state.capture_row_weights(windows_by_key=windows_by_key)
                 self.capture_row_weights_at_retile = False
             for screen_key, screen_windows in grouped_windows.items():
-                screen = screens.get(screen_key)
+                screen = screen_infos.get(screen_key)
                 if screen is None:
                     continue
                 fullscreen_key = next(
@@ -1911,7 +1894,7 @@ class WindowDaemon:
                     None,
                 )
                 if fullscreen_key is not None:
-                    self.api.set_frame(windows_by_key[fullscreen_key], screen.frame)
+                    MacOS.set_frame(windows_by_key[fullscreen_key], screen.frame)
                     continue
                 columns = self.state.reconcile(
                     screen=screen, windows=screen_windows, config=self.config
@@ -1936,24 +1919,24 @@ class WindowDaemon:
         ).items():
             window = windows_by_key.get(key)
             if window is not None:
-                self.api.set_frame(window, frame)
+                MacOS.set_frame(window, frame)
 
     def focus(self, *, direction: Direction) -> str:
-        focused = self.api.focused_window()
+        focused = MacOS.focused_window()
         if focused is None:
             return "no focused window"
-        windows = self.api.collect_windows()
+        windows = MacOS.collect_windows()
         arranged = self._arranged_windows(windows=windows)
         target = select_focus_target(
             current=focused, direction=direction, arranged=arranged
         )
         if target is None:
             return "no target window"
-        self.api.focus_window(target)
+        MacOS.focus_window(target)
         return f"focused {target.title or target.key}"
 
     def move(self, *, direction: Direction) -> str:
-        focused = self.api.focused_window()
+        focused = MacOS.focused_window()
         if focused is None:
             return "no focused window"
         changed = self.state.move(
@@ -1964,16 +1947,16 @@ class WindowDaemon:
         self.retile()
         fresh = self._fresh_window_for_key(focused.key)
         if fresh is not None:
-            self.api.focus_window(fresh)
+            MacOS.focus_window(fresh)
         return f"moved {direction}"
 
     def switch_desktop(self, *, number: int) -> str:
-        if self.api.switch_desktop(number):
+        if MacOS.switch_desktop(number):
             return f"posted desktop shortcut {number}"
         return f"cannot post desktop shortcut {number}"
 
     def toggle_fullscreen(self) -> str:
-        focused = self.api.focused_window()
+        focused = MacOS.focused_window()
         if focused is None:
             return "no focused window"
         if focused.key in self.state.fullscreen_keys:
@@ -1982,7 +1965,7 @@ class WindowDaemon:
             return "fullscreen off"
         same_screen_keys = {
             window.key
-            for window in self.api.collect_windows()
+            for window in MacOS.collect_windows()
             if window.screen_key == focused.screen_key
         }
         self.state.fullscreen_keys.difference_update(same_screen_keys)
@@ -1990,20 +1973,21 @@ class WindowDaemon:
         self.retile()
         fresh = self._fresh_window_for_key(focused.key)
         if fresh is not None:
-            self.api.focus_window(fresh)
+            MacOS.focus_window(fresh)
         return "fullscreen on"
 
     def close_focused_window(self) -> str:
-        focused = self.api.focused_window()
+        focused = MacOS.focused_window()
         if focused is None:
             return "no focused window"
-        if self.api.close_window(focused):
+        if MacOS.close_window(focused):
             return f"closed {focused.title or focused.key}"
         return "focused window cannot be closed"
 
     def _fresh_window_for_key(self, key: str) -> WindowInfo | None:
         return next(
-            (window for window in self.api.collect_windows() if window.key == key), None
+            (window for window in MacOS.collect_windows() if window.key == key),
+            None,
         )
 
     def _arranged_windows(
@@ -2022,7 +2006,7 @@ class WindowDaemon:
         if self.keybinding_manager is not None:
             self.keybinding_manager.stop()
         if self.tick_timer is not None:
-            _ = self.api.core.CFRunLoopTimerInvalidate(self.tick_timer)
+            _ = CoreFoundation.CFRunLoopTimerInvalidate(self.tick_timer)
         self._answer_pending_calls(
             IpcResponse(ok=False, message="daemon stopped before handling request")
         )
@@ -2373,7 +2357,6 @@ class DaemonArgs:
         )
         daemon = WindowDaemon(
             config=config,
-            api=MacApi.load(),
             keybindings=keybindings,
             verbose=self.verbose,
         )
