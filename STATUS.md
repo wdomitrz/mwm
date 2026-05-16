@@ -37,7 +37,7 @@ Current runtime behavior:
 - Client commands are silent by default. Use `--verbose` to print daemon
   responses.
 - `make install` installs `mwm` into `~/.local/bin` and generates a LaunchAgent
-  that starts in `$HOME`.
+  that starts in `$HOME`, with stdout and stderr sent to `/tmp/mwm_$USER.*.log`.
 
 Runtime macOS Accessibility paths still need live validation after each
 behavioral change, because doctests use an in-memory API.

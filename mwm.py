@@ -5,6 +5,7 @@
 ################################################################
 #
 # /// script
+# requires-python = ">=3.11"
 # dependencies = [
 #   "pynput",
 #   "pyobjc-framework-ApplicationServices",
@@ -20,8 +21,10 @@ import importlib
 import json
 import math
 import os
+import plistlib
 import queue
 import shlex
+import shutil
 import signal
 import socket
 import sys
@@ -32,7 +35,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import ClassVar, Literal, Protocol, assert_never, cast
+from typing import Any, ClassVar, Literal, Protocol, assert_never, cast
 
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
@@ -58,6 +61,7 @@ CliCommand = Literal[
     "retile",
     "status",
     "stop",
+    "launchd-plist",
 ]
 JsonMap = dict[str, object]
 JsonObject = dict[str, object]
@@ -65,6 +69,8 @@ PAIR_LENGTH: int = 2
 COMMAND_WITH_ARG_LENGTH: int = 2
 COMMAND_WITHOUT_ARG_LENGTH: int = 1
 DESKTOP_COUNT: int = 10
+LAUNCHD_LABEL = "mwm"
+LOCAL_BIN_NAME = ".local/bin/mwm.py"
 DESKTOP_KEY_CODES: dict[int, int] = {
     1: 0x12,
     2: 0x13,
@@ -97,7 +103,7 @@ COMMAND_KINDS: tuple[CommandKind, ...] = (
     "status",
     "stop",
 )
-CLI_COMMANDS: tuple[CliCommand, ...] = ("daemon", *COMMAND_KINDS)
+CLI_COMMANDS: tuple[CliCommand, ...] = ("daemon", *COMMAND_KINDS, "launchd-plist")
 
 
 class DynamicObjC(Protocol):
@@ -2626,6 +2632,22 @@ IpcRequest(kind='close', direction=None, desktop=None, columns=None)
 'disabled'
 >>> parse_cli_args(["daemon", "--poll-seconds", "5"]).poll_seconds
 5.0
+>>> parse_cli_args([
+...     "launchd-plist",
+...     "--label", "mwm",
+...     "--uv", "/usr/local/bin/uv",
+...     "--mwm-bin", "/Users/me/.local/bin/mwm.py",
+...     "--workdir", "/Users/me",
+...     "--stdout-log", "/tmp/mwm_me.out.log",
+...     "--stderr-log", "/tmp/mwm_me.err.log",
+...     "--output", "/Users/me/Library/LaunchAgents/mwm.plist",
+... ]).label
+'mwm'
+>>> default_plist = parse_cli_args(["launchd-plist"])
+>>> default_plist.stdout_log.name.endswith(".out.log")
+True
+>>> default_plist.stderr_log.name.endswith(".err.log")
+True
 """,
     "daemon_with_memory_api": """
 >>> daemon, api = _Test.daemon()
@@ -2673,6 +2695,34 @@ class DaemonArgs:
     keybindings_path: Path | None
     verbose: bool
 
+    @classmethod
+    def add_parser(cls, subparsers: Any) -> None:
+        parser = subparsers.add_parser("daemon")
+        parser.add_argument("--columns", "-c", type=float, default=2.0)
+        parser.add_argument("--poll-seconds", type=float, default=None)
+        parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+        parser.add_argument("--keybindings", type=Path, default=None)
+        parser.add_argument("--verbose", "-v", action="store_true")
+        parser.add_argument(
+            "--no-keybindings", action="store_false", dest="keybindings_enabled"
+        )
+        parser.set_defaults(keybindings_enabled=True)
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> DaemonArgs:
+        poll_seconds_arg = cast(float | None, args.poll_seconds)
+        poll_seconds: float | Literal["disabled"] = (
+            "disabled" if poll_seconds_arg is None else poll_seconds_arg
+        )
+        return cls(
+            columns=cast(float, args.columns),
+            poll_seconds=poll_seconds,
+            socket_path=cast(Path | None, args.socket_path),
+            keybindings_enabled=cast(bool, args.keybindings_enabled),
+            keybindings_path=cast(Path | None, args.keybindings),
+            verbose=cast(bool, args.verbose),
+        )
+
     def main(self) -> int:
         config = LayoutConfig(
             columns=self.columns,
@@ -2699,6 +2749,77 @@ class ClientArgs:
     socket_path: Path | None = None
     verbose: bool = False
 
+    @staticmethod
+    def add_options(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+        parser.add_argument("--verbose", "-v", action="store_true")
+
+    @classmethod
+    def add_parsers(cls, subparsers: Any) -> None:
+        for command in FOCUS_MOVE_COMMANDS:
+            parser = subparsers.add_parser(command)
+            parser.add_argument("direction", choices=("left", "right", "up", "down"))
+            cls.add_options(parser)
+
+        fullscreen_parser = subparsers.add_parser("fullscreen")
+        cls.add_options(fullscreen_parser)
+
+        close_parser = subparsers.add_parser("close")
+        cls.add_options(close_parser)
+
+        columns_parser = subparsers.add_parser("columns")
+        columns_parser.add_argument("number_of_columns", type=float)
+        cls.add_options(columns_parser)
+
+        goto_desktop_parser = subparsers.add_parser("goto-desktop")
+        goto_desktop_parser.add_argument("number", type=parse_desktop_number)
+        cls.add_options(goto_desktop_parser)
+
+        for command in UTILITY_COMMANDS:
+            parser = subparsers.add_parser(command)
+            cls.add_options(parser)
+
+    @classmethod
+    def from_args(cls, *, command: CommandKind, args: argparse.Namespace) -> ClientArgs:
+        socket_path = cast(Path | None, args.socket_path)
+        verbose = cast(bool, args.verbose)
+        match command:
+            case "focus" | "move":
+                return cls(
+                    request=IpcRequest(
+                        kind=command,
+                        direction=parse_direction(cast(str, args.direction)),
+                    ),
+                    socket_path=socket_path,
+                    verbose=verbose,
+                )
+            case "fullscreen" | "close" | "retile" | "status" | "stop":
+                return cls(
+                    request=IpcRequest(kind=command),
+                    socket_path=socket_path,
+                    verbose=verbose,
+                )
+            case "goto-desktop":
+                return cls(
+                    request=IpcRequest(
+                        kind="goto-desktop",
+                        desktop=cast(int, args.number),
+                    ),
+                    socket_path=socket_path,
+                    verbose=verbose,
+                )
+            case "columns":
+                return cls(
+                    request=IpcRequest(
+                        kind="columns",
+                        columns=cast(float, args.number_of_columns),
+                    ),
+                    socket_path=socket_path,
+                    verbose=verbose,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def main(self) -> int:
         response = Ipc.send(
             path=self.socket_path or Ipc.default_socket_path(), request=self.request
@@ -2709,54 +2830,135 @@ class ClientArgs:
         return 0 if response.ok else 1
 
 
-ParsedCli = DaemonArgs | ClientArgs
+@dataclass(frozen=True, kw_only=True)
+class LaunchdPlistArgs:
+    label: str
+    uv: Path
+    mwm_bin: Path
+    workdir: Path
+    stdout_log: Path
+    stderr_log: Path
+    output: Path | None
+
+    @classmethod
+    def add_parser(cls, subparsers: Any) -> None:
+        parser = subparsers.add_parser("launchd-plist")
+        parser.add_argument("--label", default=LAUNCHD_LABEL)
+        parser.add_argument("--uv", type=Path, default=None)
+        parser.add_argument("--mwm-bin", type=Path, default=None)
+        parser.add_argument("--workdir", type=Path, default=None)
+        parser.add_argument("--stdout-log", type=Path, default=None)
+        parser.add_argument("--stderr-log", type=Path, default=None)
+        parser.add_argument("--output", type=Path, default=None)
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> LaunchdPlistArgs:
+        defaults = cls.default(
+            uv=cast(Path | None, args.uv),
+            label=cast(str, args.label),
+        )
+        return cls(
+            label=defaults.label,
+            uv=defaults.uv,
+            mwm_bin=cast(Path | None, args.mwm_bin) or defaults.mwm_bin,
+            workdir=cast(Path | None, args.workdir) or defaults.workdir,
+            stdout_log=cast(Path | None, args.stdout_log) or defaults.stdout_log,
+            stderr_log=cast(Path | None, args.stderr_log) or defaults.stderr_log,
+            output=cast(Path | None, args.output) or defaults.output,
+        )
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        uv: Path | None = None,
+        label: str = LAUNCHD_LABEL,
+    ) -> LaunchdPlistArgs:
+        home = Path.home()
+        user = os.environ.get("USER") or home.name
+        log_dir = Path("/") / "tmp"
+        return cls(
+            label=label,
+            uv=uv or cls.default_uv_path(),
+            mwm_bin=home / LOCAL_BIN_NAME,
+            workdir=home,
+            stdout_log=log_dir / f"mwm_{user}.out.log",
+            stderr_log=log_dir / f"mwm_{user}.err.log",
+            output=None,
+        )
+
+    @staticmethod
+    def default_uv_path() -> Path:
+        uv = shutil.which("uv")
+        if uv is None:
+            msg = "uv was not found on PATH; install uv or pass --uv PATH"
+            raise RuntimeError(msg)
+        return Path(uv)
+
+    @staticmethod
+    def plist(
+        *,
+        label: str,
+        uv: Path,
+        mwm_bin: Path,
+        workdir: Path,
+        stdout_log: Path,
+        stderr_log: Path,
+    ) -> dict[str, object]:
+        """Build the LaunchAgent plist.
+
+        >>> plist = LaunchdPlistArgs.plist(
+        ...     label="mwm",
+        ...     uv=Path("/usr/local/bin/uv"),
+        ...     mwm_bin=Path("/Users/me/.local/bin/mwm.py"),
+        ...     workdir=Path("/Users/me"),
+        ...     stdout_log=Path("/tmp/mwm_me.out.log"),
+        ...     stderr_log=Path("/tmp/mwm_me.err.log"),
+        ... )
+        >>> plist["ProgramArguments"]
+        ['/usr/local/bin/uv', 'run', '/Users/me/.local/bin/mwm.py', 'daemon']
+        >>> plist["StandardErrorPath"]
+        '/tmp/mwm_me.err.log'
+        """
+        return {
+            "Label": label,
+            "ProgramArguments": [str(uv), "run", str(mwm_bin), "daemon"],
+            "WorkingDirectory": str(workdir),
+            "RunAtLoad": True,
+            "KeepAlive": False,
+            "StandardOutPath": str(stdout_log),
+            "StandardErrorPath": str(stderr_log),
+        }
+
+    def main(self) -> int:
+        payload = plistlib.dumps(
+            self.plist(
+                label=self.label,
+                uv=self.uv,
+                mwm_bin=self.mwm_bin,
+                workdir=self.workdir,
+                stdout_log=self.stdout_log,
+                stderr_log=self.stderr_log,
+            ),
+            fmt=plistlib.FMT_XML,
+            sort_keys=False,
+        )
+        if self.output is None:
+            sys.stdout.buffer.write(payload)
+        else:
+            self.output.write_bytes(payload)
+        return 0
 
 
-def add_client_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
-    parser.add_argument("--verbose", "-v", action="store_true")
+ParsedCli = DaemonArgs | ClientArgs | LaunchdPlistArgs
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mwm.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    daemon_parser = subparsers.add_parser("daemon")
-    daemon_parser.add_argument("--columns", "-c", type=float, default=2.0)
-    daemon_parser.add_argument("--poll-seconds", type=float, default=None)
-    daemon_parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
-    daemon_parser.add_argument("--keybindings", type=Path, default=None)
-    daemon_parser.add_argument("--verbose", "-v", action="store_true")
-    daemon_parser.add_argument(
-        "--no-keybindings", action="store_false", dest="keybindings_enabled"
-    )
-    daemon_parser.set_defaults(keybindings_enabled=True)
-
-    for command in FOCUS_MOVE_COMMANDS:
-        command_parser = subparsers.add_parser(command)
-        command_parser.add_argument(
-            "direction", choices=("left", "right", "up", "down")
-        )
-        add_client_options(command_parser)
-
-    fullscreen_parser = subparsers.add_parser("fullscreen")
-    add_client_options(fullscreen_parser)
-
-    close_parser = subparsers.add_parser("close")
-    add_client_options(close_parser)
-
-    columns_parser = subparsers.add_parser("columns")
-    columns_parser.add_argument("number_of_columns", type=float)
-    add_client_options(columns_parser)
-
-    goto_desktop_parser = subparsers.add_parser("goto-desktop")
-    goto_desktop_parser.add_argument("number", type=parse_desktop_number)
-    add_client_options(goto_desktop_parser)
-
-    for command in UTILITY_COMMANDS:
-        command_parser = subparsers.add_parser(command)
-        add_client_options(command_parser)
-
+    DaemonArgs.add_parser(subparsers)
+    LaunchdPlistArgs.add_parser(subparsers)
+    ClientArgs.add_parsers(subparsers)
     return parser
 
 
@@ -2769,49 +2971,21 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
     command = parse_cli_command(cast(str, args.command))
     match command:
         case "daemon":
-            columns = cast(float, args.columns)
-            poll_seconds_arg = cast(float | None, args.poll_seconds)
-            poll_seconds: float | Literal["disabled"] = (
-                "disabled" if poll_seconds_arg is None else poll_seconds_arg
-            )
-            socket_path = cast(Path | None, args.socket_path)
-            keybindings_enabled = cast(bool, args.keybindings_enabled)
-            keybindings_path = cast(Path | None, args.keybindings)
-            verbose = cast(bool, args.verbose)
-            return DaemonArgs(
-                columns=columns,
-                poll_seconds=poll_seconds,
-                socket_path=socket_path,
-                keybindings_enabled=keybindings_enabled,
-                keybindings_path=keybindings_path,
-                verbose=verbose,
-            )
-        case "focus" | "move":
-            direction = cast(str, args.direction)
-            socket_path = cast(Path | None, args.socket_path)
-            verbose = cast(bool, args.verbose)
-            request = IpcRequest(
-                kind=cast(CommandKind, command),
-                direction=parse_direction(direction),
-            )
-            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
-        case "fullscreen" | "close" | "retile" | "status" | "stop":
-            socket_path = cast(Path | None, args.socket_path)
-            verbose = cast(bool, args.verbose)
-            request = IpcRequest(kind=cast(CommandKind, command))
-            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
-        case "goto-desktop":
-            desktop = cast(int, args.number)
-            socket_path = cast(Path | None, args.socket_path)
-            verbose = cast(bool, args.verbose)
-            request = IpcRequest(kind="goto-desktop", desktop=desktop)
-            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
-        case "columns":
-            columns = cast(float, args.number_of_columns)
-            socket_path = cast(Path | None, args.socket_path)
-            verbose = cast(bool, args.verbose)
-            request = IpcRequest(kind="columns", columns=columns)
-            return ClientArgs(request=request, socket_path=socket_path, verbose=verbose)
+            return DaemonArgs.from_args(args)
+        case "launchd-plist":
+            return LaunchdPlistArgs.from_args(args)
+        case (
+            "focus"
+            | "move"
+            | "fullscreen"
+            | "close"
+            | "retile"
+            | "status"
+            | "stop"
+            | "goto-desktop"
+            | "columns"
+        ):
+            return ClientArgs.from_args(command=command, args=args)
         case _ as unreachable:
             assert_never(unreachable)
 
