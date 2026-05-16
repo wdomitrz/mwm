@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import importlib
 import json
 import math
 import os
@@ -35,8 +34,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import ModuleType
-from typing import Any, ClassVar, Literal, Protocol, assert_never, cast
+from typing import ClassVar, Literal, Protocol, assert_never, cast, override
 
 Direction = Literal["left", "right", "up", "down"]
 ModifierName = Literal["cmd", "ctrl", "alt", "shift"]
@@ -118,6 +116,10 @@ class DynamicObjC(Protocol):
     def __ror__(self, other: object) -> DynamicObjC: ...
 
 
+class Subparsers(Protocol):
+    def add_parser(self, name: str, **kwargs: object) -> argparse.ArgumentParser: ...
+
+
 class CocoaPoint(Protocol):
     x: float
     y: float
@@ -166,7 +168,7 @@ def to_int(value: object) -> int:
 
 
 def parse_json_map(payload: bytes) -> JsonMap:
-    raw = json.loads(payload.decode())
+    raw = cast(object, json.loads(payload.decode()))
     assert isinstance(raw, dict)
     return cast(JsonMap, raw)
 
@@ -213,11 +215,14 @@ def default_socket_path() -> Path:
 
 def import_keyboard() -> DynamicObjC:
     try:
-        module = importlib.import_module("pynput.keyboard")
+        from pynput import (  # noqa: PLC0415  # pyright: ignore[reportMissingModuleSource]
+            keyboard,  # pyright: ignore[reportMissingModuleSource]
+        )
     except ImportError as error:
         msg = "pynput is required for built-in keybindings; use --no-keybindings to run without it."
         raise RuntimeError(msg) from error
-    return cast(DynamicObjC, cast(ModuleType, module))
+
+    return cast(DynamicObjC, keyboard)  # pyright: ignore[reportInvalidCast]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -748,7 +753,7 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
 def load_keybindings(path: Path | None) -> tuple[KeyBinding, ...]:
     if path is None:
         return default_keybindings()
-    raw = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    raw = cast(object, json.loads(path.expanduser().read_text(encoding="utf-8")))
     assert isinstance(raw, dict)
     config = cast(JsonObject, raw)
     bindings = config.get("bindings", config)
@@ -797,21 +802,21 @@ def parse_binding_command(command: str) -> IpcRequest:
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             assert len(parts) == COMMAND_WITHOUT_ARG_LENGTH
             return IpcRequest(kind=kind)
-        case _ as unreachable:
-            assert_never(unreachable)
+        case _:
+            assert_never(kind)
 
 
 class KeyBindingManager:
     def __init__(
         self, *, bindings: tuple[KeyBinding, ...], submit: Callable[[IpcRequest], None]
     ) -> None:
-        self.bindings = bindings
-        self.submit = submit
-        self.lock = threading.RLock()
+        self.bindings: tuple[KeyBinding, ...] = bindings
+        self.submit: Callable[[IpcRequest], None] = submit
+        self.lock: threading.RLock = threading.RLock()
         self.pressed_modifiers: set[ModifierName] = set()
         self.pressed_keys: set[str] = set()
         self.suppressed_releases: set[str] = set()
-        self.consume_current_event = False
+        self.consume_current_event: bool = False
         self.listener: object | None = None
 
     def start(self) -> None:
@@ -822,16 +827,16 @@ class KeyBindingManager:
             suppress=False,
             darwin_intercept=self._intercept,
         )
-        listener.start()
-        listener.wait()
+        _ = listener.start()
+        _ = listener.wait()
         self.listener = listener
 
     def stop(self) -> None:
         if self.listener is None:
             return
         listener = cast(DynamicObjC, self.listener)
-        listener.stop()
-        listener.join(timeout=2)
+        _ = listener.stop()
+        _ = listener.join(timeout=2)
         self.listener = None
 
     def _on_press(self, key: object, injected: object = None) -> None:
@@ -897,11 +902,11 @@ class MacApi:
     @classmethod
     def load(cls) -> MacApi:
         try:
-            import AppKit  # pyright: ignore[reportMissingImports]
-            import CoreFoundation  # pyright: ignore[reportMissingImports]
-            import HIServices  # pyright: ignore[reportMissingImports]
-            import objc  # pyright: ignore[reportMissingImports]
-            import Quartz  # pyright: ignore[reportMissingImports]
+            import AppKit  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+            import CoreFoundation  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+            import HIServices  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+            import objc  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+            import Quartz  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
         except ImportError as error:
             msg = (
                 "mwm requires PyObjC on macOS. Install the script dependencies with uv, "
@@ -909,15 +914,15 @@ class MacApi:
             )
             raise RuntimeError(msg) from error
         return cls(
-            appkit=cast(DynamicObjC, AppKit),
-            core=cast(DynamicObjC, CoreFoundation),
-            hiservices=cast(DynamicObjC, HIServices),
-            objc=cast(DynamicObjC, objc),
-            quartz=cast(DynamicObjC, Quartz),
+            appkit=cast(DynamicObjC, AppKit),  # pyright: ignore[reportInvalidCast]
+            core=cast(DynamicObjC, CoreFoundation),  # pyright: ignore[reportInvalidCast]
+            hiservices=cast(DynamicObjC, HIServices),  # pyright: ignore[reportInvalidCast]
+            objc=cast(DynamicObjC, objc),  # pyright: ignore[reportInvalidCast]
+            quartz=cast(DynamicObjC, Quartz),  # pyright: ignore[reportInvalidCast]
         )
 
     def ensure_accessibility(self) -> None:
-        if cast(bool, self.hiservices.AXIsProcessTrusted()):
+        if bool(cast(object, self.hiservices.AXIsProcessTrusted())):
             return
         prompt_key = self.hiservices.kAXTrustedCheckOptionPrompt
         _trusted = self.hiservices.AXIsProcessTrustedWithOptions({prompt_key: True})
@@ -934,11 +939,11 @@ class MacApi:
 
     def ax_set(self, element: object, attribute: object, value: object) -> bool:
         error = self.hiservices.AXUIElementSetAttributeValue(element, attribute, value)
-        return cast(bool, error == self.hiservices.kAXErrorSuccess)
+        return error == self.hiservices.kAXErrorSuccess
 
     def ax_action(self, element: object, action: object) -> bool:
         error = self.hiservices.AXUIElementPerformAction(element, action)
-        return cast(bool, error == self.hiservices.kAXErrorSuccess)
+        return error == self.hiservices.kAXErrorSuccess
 
     def ax_pid(self, element: object) -> int | None:
         result = parse_ax_copy_value(self.hiservices.AXUIElementGetPid(element, None))
@@ -1013,11 +1018,14 @@ class MacApi:
         if key_code is None:
             return False
         for is_down in (True, False):
-            event = self.quartz.CGEventCreateKeyboardEvent(None, key_code, is_down)
+            event = cast(
+                object,
+                self.quartz.CGEventCreateKeyboardEvent(None, key_code, is_down),
+            )
             if event is None:
                 return False
-            self.quartz.CGEventSetFlags(event, self.quartz.kCGEventFlagMaskControl)
-            self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, event)
+            _ = self.quartz.CGEventSetFlags(event, self.quartz.kCGEventFlagMaskControl)
+            _ = self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, event)
         return True
 
     def screens(self) -> tuple[ScreenInfo, ...]:
@@ -1029,7 +1037,7 @@ class MacApi:
         result: list[ScreenInfo] = []
         for index, screen in enumerate(screens):
             frame = Rect.from_cocoa_rect(
-                cast(CocoaRect, screen.visibleFrame()),
+                cast(CocoaRect, cast(object, screen.visibleFrame())),
                 main_screen_height=main_screen_height,
             )
             result.append(ScreenInfo(key=f"{index}:{frame.as_key()}", frame=frame))
@@ -1045,9 +1053,13 @@ class MacApi:
         return tuple(sorted(set(pids)))
 
     def frontmost_pid(self) -> int | None:
-        app = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None:
+        raw_app = cast(
+            object,
+            self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication(),
+        )
+        if raw_app is None:
             return None
+        app = cast(DynamicObjC, raw_app)
         pid = int(app.processIdentifier())
         if pid <= 0 or pid == os.getpid():
             return None
@@ -1384,7 +1396,7 @@ class LayoutState:
                         return False
                     columns.insert(0, [])
                     column_index += 1
-                self.row_weights_by_key.pop(key, None)
+                _ = self.row_weights_by_key.pop(key, None)
                 move_between_columns(
                     columns=columns,
                     key=key,
@@ -1398,15 +1410,15 @@ class LayoutState:
                     ):
                         return False
                     columns.insert(column_index + 1, [])
-                self.row_weights_by_key.pop(key, None)
+                _ = self.row_weights_by_key.pop(key, None)
                 move_between_columns(
                     columns=columns,
                     key=key,
                     source_index=column_index,
                     target_index=column_index + 1,
                 )
-            case _ as unreachable:
-                assert_never(unreachable)
+            case _:
+                assert_never(direction)
         self.columns_by_screen[screen_key] = [column for column in columns if column]
         return True
 
@@ -1470,27 +1482,27 @@ class WindowDaemon:
         keybindings: tuple[KeyBinding, ...] | None = None,
         verbose: bool = False,
     ) -> None:
-        self.config = config
-        self.api = api
-        self.verbose = verbose
-        self.state = LayoutState()
+        self.config: LayoutConfig = config
+        self.api: MacApi = api
+        self.verbose: bool = verbose
+        self.state: LayoutState = LayoutState()
         self.observers: dict[int, AppObserver] = {}
         self.observed_windows: set[str] = set()
-        self.lock = threading.RLock()
+        self.lock: threading.RLock = threading.RLock()
         self.pending_ipc_calls: queue.Queue[PendingIpcCall] = queue.Queue()
-        self.ax_callback = self._make_ax_callback(api=api)
-        self.keybinding_manager = (
+        self.ax_callback: object = self._make_ax_callback(api=api)
+        self.keybinding_manager: KeyBindingManager | None = (
             KeyBindingManager(bindings=keybindings, submit=self.submit_keybinding)
             if keybindings is not None
             else None
         )
-        self.running = False
+        self.running: bool = False
         self.ipc_thread: threading.Thread | None = None
         self.tick_timer: object | None = None
         self.next_periodic_at: float | None = None
         self.retile_at: float | None = None
-        self.capture_row_weights_at_retile = False
-        self.ignore_events_until = 0.0
+        self.capture_row_weights_at_retile: bool = False
+        self.ignore_events_until: float = 0.0
         self.run_loop: object | None = None
 
     def _make_ax_callback(self, *, api: MacApi) -> object:
@@ -1499,7 +1511,9 @@ class WindowDaemon:
         ) -> None:
             self._ax_callback(observer, element, notification, refcon)
 
-        return api.objc.callbackFor(api.hiservices.AXObserverCreate)(callback)
+        return cast(
+            object, api.objc.callbackFor(api.hiservices.AXObserverCreate)(callback)
+        )
 
     def run(self) -> int:
         self.api.ensure_accessibility()
@@ -1514,7 +1528,7 @@ class WindowDaemon:
         if self.config.poll_seconds != "disabled":
             self.next_periodic_at = time.monotonic() + self.config.poll_seconds
         self._install_tick_timer()
-        self.api.core.CFRunLoopRun()
+        _ = self.api.core.CFRunLoopRun()
         self.running = False
         self._cleanup()
         return 0
@@ -1523,13 +1537,13 @@ class WindowDaemon:
         def stop_from_signal(_signum: int, _frame: object) -> None:
             self.stop()
 
-        signal.signal(signal.SIGINT, stop_from_signal)
-        signal.signal(signal.SIGTERM, stop_from_signal)
+        _ = signal.signal(signal.SIGINT, stop_from_signal)
+        _ = signal.signal(signal.SIGTERM, stop_from_signal)
 
     def stop(self) -> None:
         self.running = False
         run_loop = self.run_loop or self.api.core.CFRunLoopGetCurrent()
-        self.api.core.CFRunLoopStop(run_loop)
+        _ = self.api.core.CFRunLoopStop(run_loop)
 
     def _start_ipc(self) -> None:
         socket_path = self.config.socket_path
@@ -1555,7 +1569,7 @@ class WindowDaemon:
             self._tick,
             None,
         )
-        self.api.core.CFRunLoopAddTimer(
+        _ = self.api.core.CFRunLoopAddTimer(
             run_loop,
             self.tick_timer,
             self.api.core.kCFRunLoopCommonModes,
@@ -1568,7 +1582,7 @@ class WindowDaemon:
             server.settimeout(self.SOCKET_TIMEOUT_SECONDS)
             while self.running:
                 try:
-                    client, _address = server.accept()
+                    client = server.accept()[0]
                 except TimeoutError:
                     continue
                 except OSError:
@@ -1597,7 +1611,7 @@ class WindowDaemon:
 
     def _wake_run_loop(self) -> None:
         if self.run_loop is not None:
-            self.api.core.CFRunLoopWakeUp(self.run_loop)
+            _ = self.api.core.CFRunLoopWakeUp(self.run_loop)
 
     @staticmethod
     def _read_client_payload(client: socket.socket) -> bytes:
@@ -1615,7 +1629,7 @@ class WindowDaemon:
         try:
             request = IpcRequest.from_json(payload)
             message = self.handle(request)
-        except Exception as error:
+        except (AssertionError, KeyError, TypeError, ValueError) as error:
             if self.verbose:
                 print(f"{source}: invalid command -> {error}", flush=True)
             return IpcResponse(ok=False, message=str(error))
@@ -1681,8 +1695,8 @@ class WindowDaemon:
                 case "stop":
                     self.stop()
                     return "stopping"
-                case _ as unreachable:
-                    assert_never(unreachable)
+                case _:
+                    assert_never(request.kind)
 
     def status(self) -> str:
         windows = self.api.collect_windows()
@@ -1716,7 +1730,7 @@ class WindowDaemon:
         if result.error != self.api.hiservices.kAXErrorSuccess:
             return
         self.observers[pid] = AppObserver(pid=pid, app=app, observer=result.value)
-        self.api.core.CFRunLoopAddSource(
+        _ = self.api.core.CFRunLoopAddSource(
             self.run_loop or self.api.core.CFRunLoopGetCurrent(),
             self.api.hiservices.AXObserverGetRunLoopSource(result.value),
             self.api.core.kCFRunLoopCommonModes,
@@ -1940,7 +1954,7 @@ class WindowDaemon:
         if self.keybinding_manager is not None:
             self.keybinding_manager.stop()
         if self.tick_timer is not None:
-            self.api.core.CFRunLoopTimerInvalidate(self.tick_timer)
+            _ = self.api.core.CFRunLoopTimerInvalidate(self.tick_timer)
         self._answer_pending_calls(
             IpcResponse(ok=False, message="daemon stopped before handling request")
         )
@@ -2158,8 +2172,8 @@ def select_focus_target(
                     return closest_by_vertical_center(
                         current=current, candidates=columns[column_index + 1]
                     )
-                case _ as unreachable:
-                    assert_never(unreachable)
+                case _:
+                    assert_never(direction)
     candidates = tuple(window for column in columns for window in column)
     return geometric_focus_target(
         current=current, direction=direction, candidates=candidates
@@ -2207,8 +2221,8 @@ def geometric_focus_target(
                 for window in candidates
                 if window.frame.center_y > current.frame.center_y
             ]
-        case _ as unreachable:
-            assert_never(unreachable)
+        case _:
+            assert_never(direction)
     return min(
         possible,
         key=lambda window: current.frame.distance_to(window.frame),
@@ -2234,8 +2248,8 @@ def request_summary(request: IpcRequest) -> str:
             return f"columns {columns}"
         case "fullscreen" | "close" | "retile" | "status" | "stop":
             return request.kind
-        case _ as unreachable:
-            assert_never(unreachable)
+        case _:
+            assert_never(request.kind)
 
 
 def require_desktop(request: IpcRequest) -> int:
@@ -2248,7 +2262,7 @@ def require_desktop(request: IpcRequest) -> int:
 def parse_direction(value: str) -> Direction:
     match value:
         case "left" | "right" | "up" | "down":
-            return cast(Direction, value)
+            return value
         case _:
             msg = f"unknown direction: {value}"
             raise ValueError(msg)
@@ -2264,14 +2278,14 @@ def parse_desktop_number(value: object) -> int:
 
 def parse_command_kind(value: str) -> CommandKind:
     if value in COMMAND_KINDS:
-        return cast(CommandKind, value)
+        return value
     msg = f"unknown command: {value}"
     raise ValueError(msg)
 
 
 def parse_cli_command(value: str) -> CliCommand:
     if value in CLI_COMMANDS:
-        return cast(CliCommand, value)
+        return value
     msg = f"unknown command: {value}"
     raise ValueError(msg)
 
@@ -2350,6 +2364,13 @@ class _FocusedWindowApi(MacApi):
         app_windows: tuple[object, ...] = (),
         frontmost: int | None = 7,
     ) -> None:
+        super().__init__(
+            appkit=cast(DynamicObjC, object()),
+            core=cast(DynamicObjC, object()),
+            hiservices=cast(DynamicObjC, cast(object, _FocusedHiservices())),
+            objc=cast(DynamicObjC, object()),
+            quartz=cast(DynamicObjC, object()),
+        )
         object.__setattr__(self, "hiservices", _FocusedHiservices())
         self.windows = windows
         self.focused_app = focused_app
@@ -2362,9 +2383,11 @@ class _FocusedWindowApi(MacApi):
             ScreenInfo(key="s", frame=Rect(x=0, y=0, width=1000, height=500)),
         )
 
+    @override
     def collect_windows(self) -> tuple[WindowInfo, ...]:
         return self.windows
 
+    @override
     def ax_get(self, element: object, attribute: object) -> object | None:
         if element == "system" and attribute == "focused_application":
             return self.focused_app
@@ -2380,27 +2403,33 @@ class _FocusedWindowApi(MacApi):
             return str(element)
         return None
 
+    @override
     def ax_pid(self, element: object) -> int | None:
         if element in {"app", "created-app"}:
             return 7
         return None
 
+    @override
     def frontmost_pid(self) -> int | None:
         return self.frontmost
 
+    @override
     def window_number(self, window: object) -> int | None:
         if window in {"focused", "app-focused", "main", "listed"}:
             return 11
         return None
 
+    @override
     def ax_frame(self, window: object) -> Rect | None:
         if window in {"focused", "app-focused", "main", "listed"}:
             return Rect(x=10, y=10, width=100, height=100)
         return None
 
+    @override
     def screens(self) -> tuple[ScreenInfo, ...]:
         return self.screen_values
 
+    @override
     def window_stable_id(self, window: object) -> int:
         return {"focused": 101, "app-focused": 102, "main": 103}.get(str(window), 999)
 
@@ -2472,7 +2501,7 @@ class _Test:
         )
         daemon = WindowDaemon(
             config=LayoutConfig(columns=columns),
-            api=cast(MacApi, api),
+            api=cast(MacApi, cast(object, api)),
         )
         return (daemon, api)
 
@@ -2697,17 +2726,17 @@ class DaemonArgs:
     verbose: bool
 
     @classmethod
-    def add_parser(cls, subparsers: Any) -> None:
+    def add_parser(cls, subparsers: Subparsers) -> None:
         parser = subparsers.add_parser("daemon")
-        parser.add_argument("--columns", "-c", type=float, default=2.0)
-        parser.add_argument("--poll-seconds", type=float, default=None)
-        parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
-        parser.add_argument("--keybindings", type=Path, default=None)
-        parser.add_argument("--verbose", "-v", action="store_true")
-        parser.add_argument(
+        _ = parser.add_argument("--columns", "-c", type=float, default=2.0)
+        _ = parser.add_argument("--poll-seconds", type=float, default=None)
+        _ = parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+        _ = parser.add_argument("--keybindings", type=Path, default=None)
+        _ = parser.add_argument("--verbose", "-v", action="store_true")
+        _ = parser.add_argument(
             "--no-keybindings", action="store_false", dest="keybindings_enabled"
         )
-        parser.set_defaults(keybindings_enabled=True)
+        _ = parser.set_defaults(keybindings_enabled=True)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> DaemonArgs:
@@ -2752,14 +2781,16 @@ class ClientArgs:
 
     @staticmethod
     def add_options(parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
-        parser.add_argument("--verbose", "-v", action="store_true")
+        _ = parser.add_argument("--socket", type=Path, default=None, dest="socket_path")
+        _ = parser.add_argument("--verbose", "-v", action="store_true")
 
     @classmethod
-    def add_parsers(cls, subparsers: Any) -> None:
+    def add_parsers(cls, subparsers: Subparsers) -> None:
         for command in FOCUS_MOVE_COMMANDS:
             parser = subparsers.add_parser(command)
-            parser.add_argument("direction", choices=("left", "right", "up", "down"))
+            _ = parser.add_argument(
+                "direction", choices=("left", "right", "up", "down")
+            )
             cls.add_options(parser)
 
         fullscreen_parser = subparsers.add_parser("fullscreen")
@@ -2769,11 +2800,11 @@ class ClientArgs:
         cls.add_options(close_parser)
 
         columns_parser = subparsers.add_parser("columns")
-        columns_parser.add_argument("number_of_columns", type=float)
+        _ = columns_parser.add_argument("number_of_columns", type=float)
         cls.add_options(columns_parser)
 
         goto_desktop_parser = subparsers.add_parser("goto-desktop")
-        goto_desktop_parser.add_argument("number", type=parse_desktop_number)
+        _ = goto_desktop_parser.add_argument("number", type=parse_desktop_number)
         cls.add_options(goto_desktop_parser)
 
         for command in UTILITY_COMMANDS:
@@ -2818,8 +2849,8 @@ class ClientArgs:
                     socket_path=socket_path,
                     verbose=verbose,
                 )
-            case _ as unreachable:
-                assert_never(unreachable)
+            case _:
+                assert_never(command)
 
     def main(self) -> int:
         response = Ipc.send(
@@ -2842,15 +2873,15 @@ class LaunchdPlistArgs:
     output: Path | None
 
     @classmethod
-    def add_parser(cls, subparsers: Any) -> None:
+    def add_parser(cls, subparsers: Subparsers) -> None:
         parser = subparsers.add_parser("launchd-plist")
-        parser.add_argument("--label", default=LAUNCHD_LABEL)
-        parser.add_argument("--uv", type=Path, default=None)
-        parser.add_argument("--mwm-bin", type=Path, default=None)
-        parser.add_argument("--workdir", type=Path, default=None)
-        parser.add_argument("--stdout-log", type=Path, default=None)
-        parser.add_argument("--stderr-log", type=Path, default=None)
-        parser.add_argument("--output", type=Path, default=None)
+        _ = parser.add_argument("--label", default=LAUNCHD_LABEL)
+        _ = parser.add_argument("--uv", type=Path, default=None)
+        _ = parser.add_argument("--mwm-bin", type=Path, default=None)
+        _ = parser.add_argument("--workdir", type=Path, default=None)
+        _ = parser.add_argument("--stdout-log", type=Path, default=None)
+        _ = parser.add_argument("--stderr-log", type=Path, default=None)
+        _ = parser.add_argument("--output", type=Path, default=None)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> LaunchdPlistArgs:
@@ -2945,9 +2976,9 @@ class LaunchdPlistArgs:
             sort_keys=False,
         )
         if self.output is None:
-            sys.stdout.buffer.write(payload)
+            _ = sys.stdout.buffer.write(payload)
         else:
-            self.output.write_bytes(payload)
+            _ = self.output.write_bytes(payload)
         return 0
 
 
@@ -2956,7 +2987,10 @@ ParsedCli = DaemonArgs | ClientArgs | LaunchdPlistArgs
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mwm.py")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = cast(
+        Subparsers,
+        cast(object, parser.add_subparsers(dest="command", required=True)),
+    )
     DaemonArgs.add_parser(subparsers)
     LaunchdPlistArgs.add_parser(subparsers)
     ClientArgs.add_parsers(subparsers)
@@ -2987,8 +3021,8 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             | "columns"
         ):
             return ClientArgs.from_args(command=command, args=args)
-        case _ as unreachable:
-            assert_never(unreachable)
+        case _:
+            assert_never(command)
 
 
 def main(argv: list[str] | None = None) -> int:

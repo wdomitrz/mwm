@@ -33,11 +33,6 @@ ignore = [
 ]
 extend-select = ["I"]
 
-[tool.ruff.lint.per-file-ignores]
-"mwm.py" = ["ANN401", "BLE001", "PLC0415"]
-
 [tool.pyright]
-typeCheckingMode = "strict"
+typeCheckingMode = "all"
 exclude = [".venv", "pyobjc"]
-reportUnnecessaryComparison = false
-reportUnnecessaryCast = false
