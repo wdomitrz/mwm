@@ -1899,9 +1899,22 @@ def group_windows_by_screen(
     return {screen_key: tuple(items) for screen_key, items in grouped.items()}
 
 
-def window_sort_key(window: WindowInfo) -> tuple[str, int, int, str]:
-    """Return a stable collection order for initial placement and new windows."""
-    return (window.screen_key, window.pid, window.order, window.key)
+def window_sort_key(window: WindowInfo) -> tuple[str, int, int, int, int, str]:
+    """Return a geometry-first order for initial placement and new windows.
+
+    >>> left = WindowInfo(key="left", pid=2, ax="left", title="", frame=Rect(x=0, y=0, width=100, height=100), screen_key="s", window_number=2, order=2)
+    >>> right = WindowInfo(key="right", pid=1, ax="right", title="", frame=Rect(x=100, y=0, width=100, height=100), screen_key="s", window_number=1, order=1)
+    >>> [window.key for window in sorted((right, left), key=window_sort_key)]
+    ['left', 'right']
+    """
+    return (
+        window.screen_key,
+        window.frame.x,
+        window.frame.y,
+        window.pid,
+        window.order,
+        window.key,
+    )
 
 
 def usable_weights(
