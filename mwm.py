@@ -37,11 +37,13 @@ from pathlib import Path
 from types import FrameType
 from typing import (
     ClassVar,
+    Generic,
     Literal,
     Protocol,
     Self,
     TypeAlias,
     TypedDict,
+    TypeVar,
     assert_never,
     cast,
     runtime_checkable,
@@ -144,14 +146,16 @@ Quartz: DynamicObjC
 
 AxElement: TypeAlias = Hashable
 AxAttribute: TypeAlias = DynamicObjC | str
-AxRawValue: TypeAlias = None | bool | NumberLike | AxElement | tuple["AxRawValue", ...]
-AxTuple: TypeAlias = tuple[AxRawValue, AxRawValue]
+AxAttributeValue: TypeAlias = None | bool | NumberLike | AxElement | DynamicObjC
+AxError: TypeAlias = AxAttributeValue
 AxCallback: TypeAlias = DynamicObjC
 AxNotification: TypeAlias = AxAttribute
 RunLoopHandle: TypeAlias = DynamicObjC
 TimerHandle: TypeAlias = DynamicObjC
 KeyboardEvent: TypeAlias = DynamicObjC
 KeyboardCallback: TypeAlias = Callable[[keyboard.Key | keyboard.KeyCode | None], None]
+ErrorT = TypeVar("ErrorT")
+ValueT = TypeVar("ValueT")
 
 
 class Subparsers(Protocol):
@@ -186,7 +190,7 @@ class CocoaRect(Protocol):
 
 
 QuartzBounds: TypeAlias = Mapping[str, NumberLike]
-QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxRawValue | QuartzBounds]
+QuartzWindowInfo: TypeAlias = Mapping[DynamicObjC, AxAttributeValue | QuartzBounds]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -218,25 +222,25 @@ class AxSize:
 
 
 @dataclass(frozen=True, kw_only=True)
-class AxCopyValue:
-    error: AxRawValue
-    value: AxRawValue
+class AxCopyValue(Generic[ErrorT, ValueT]):
+    error: ErrorT
+    value: ValueT
 
     @classmethod
-    def parse(cls, raw: AxTuple) -> Self:
+    def parse(cls, raw: tuple[ErrorT, ValueT]) -> Self:
         error, value = raw
         return cls(error=error, value=value)
 
 
 @dataclass(frozen=True, kw_only=True)
-class AxValue:
+class AxValue(Generic[ValueT]):
     ok: bool
-    value: AxRawValue
+    value: ValueT
 
     @classmethod
-    def parse(cls, raw: AxTuple) -> Self:
+    def parse(cls, raw: tuple[bool, ValueT]) -> Self:
         ok, value = raw
-        return cls(ok=bool(ok), value=value)
+        return cls(ok=ok, value=value)
 
 
 def default_socket_path() -> Path:
@@ -590,32 +594,7 @@ class KeyChord:
         "alt": 2,
         "shift": 3,
     }
-    MODIFIER_ALIASES: ClassVar[dict[str, ModifierName]] = {
-        "cmd": "cmd",
-        "cmd_l": "cmd",
-        "cmd_r": "cmd",
-        "command": "cmd",
-        "ctrl": "ctrl",
-        "ctrl_l": "ctrl",
-        "ctrl_r": "ctrl",
-        "control": "ctrl",
-        "alt": "alt",
-        "alt_l": "alt",
-        "alt_r": "alt",
-        "option": "alt",
-        "shift": "shift",
-        "shift_l": "shift",
-        "shift_r": "shift",
-    }
-    KEY_ALIASES: ClassVar[dict[str, str]] = {
-        "return": "enter",
-        "escape": "esc",
-        "spacebar": "space",
-        "left": "left",
-        "right": "right",
-        "up": "up",
-        "down": "down",
-    }
+    MODIFIERS: ClassVar[frozenset[ModifierName]] = frozenset(MODIFIER_ORDER.keys())
     VK_ALIASES: ClassVar[dict[int, str]] = {
         0x00: "a",
         0x01: "s",
@@ -678,7 +657,7 @@ class KeyChord:
     def from_event_key(cls, key: KeyboardKey) -> str | None:
         name = getattr(key, "name", None)
         if isinstance(name, str):
-            return cls.KEY_ALIASES.get(name, cls.MODIFIER_ALIASES.get(name, name))
+            return name
         vk = getattr(key, "vk", None)
         if isinstance(vk, int):
             return cls.VK_ALIASES.get(vk, f"vk:{vk}")
@@ -689,22 +668,24 @@ class KeyChord:
 
     @classmethod
     def normalise_modifier(cls, value: str) -> ModifierName:
-        modifier = cls.MODIFIER_ALIASES.get(value.strip().casefold())
-        if modifier is None:
-            msg = f"unknown modifier: {value}"
-            raise ValueError(msg)
-        return modifier
+        modifier = cls.modifier_from_event_key(value.strip().casefold())
+        if modifier is not None:
+            return modifier
+        msg = f"unknown modifier: {value}"
+        raise ValueError(msg)
 
     @classmethod
     def modifier_from_event_key(cls, value: str) -> ModifierName | None:
-        return cls.MODIFIER_ALIASES.get(value)
+        if value in cls.MODIFIERS:
+            return value
+        return None
 
     @classmethod
     def normalise_key(cls, value: str) -> str:
         token = value.strip().casefold()
         if token.startswith("0x"):
             return f"vk:{int(token, 0)}"
-        return cls.KEY_ALIASES.get(token, token)
+        return token
 
     def matches(self, *, key: str, modifiers: set[ModifierName]) -> bool:
         return self.key == key and set(self.modifiers) == modifiers
@@ -918,10 +899,10 @@ class MacOS:
         raise RuntimeError(msg)
 
     @staticmethod
-    def ax_get(element: AxElement, attribute: AxAttribute) -> AxRawValue | None:
-        result = AxCopyValue.parse(
+    def ax_get(element: AxElement, attribute: AxAttribute) -> AxAttributeValue | None:
+        result = AxCopyValue[AxError, AxAttributeValue].parse(
             cast(
-                AxTuple,
+                tuple[AxError, AxAttributeValue],
                 cast(
                     object,
                     HIServices.AXUIElementCopyAttributeValue(element, attribute, None),
@@ -933,7 +914,9 @@ class MacOS:
         return result.value
 
     @staticmethod
-    def ax_set(element: AxElement, attribute: AxAttribute, value: AxRawValue) -> bool:
+    def ax_set(
+        element: AxElement, attribute: AxAttribute, value: AxAttributeValue
+    ) -> bool:
         error = HIServices.AXUIElementSetAttributeValue(element, attribute, value)
         return error == HIServices.kAXErrorSuccess
 
@@ -944,15 +927,15 @@ class MacOS:
 
     @staticmethod
     def ax_pid(element: AxElement) -> int | None:
-        result = AxCopyValue.parse(
+        result = AxCopyValue[AxError, NumberLike].parse(
             cast(
-                AxTuple,
+                tuple[AxError, NumberLike],
                 cast(object, HIServices.AXUIElementGetPid(element, None)),
             )
         )
         if result.error != HIServices.kAXErrorSuccess:
             return None
-        return int(cast(NumberLike, result.value))
+        return int(result.value)
 
     @staticmethod
     def ax_bool(
@@ -964,10 +947,10 @@ class MacOS:
         return bool(value)
 
     @staticmethod
-    def ax_point(value: AxRawValue) -> AxPoint | None:
-        result = AxValue.parse(
+    def ax_point(value: AxAttributeValue) -> AxPoint | None:
+        result = AxValue[CocoaPoint].parse(
             cast(
-                AxTuple,
+                tuple[bool, CocoaPoint],
                 cast(
                     object,
                     HIServices.AXValueGetValue(
@@ -978,13 +961,13 @@ class MacOS:
         )
         if not result.ok:
             return None
-        return AxPoint.parse(cast(CocoaPoint, result.value))
+        return AxPoint.parse(result.value)
 
     @staticmethod
-    def ax_size(value: AxRawValue) -> AxSize | None:
-        result = AxValue.parse(
+    def ax_size(value: AxAttributeValue) -> AxSize | None:
+        result = AxValue[CocoaSize].parse(
             cast(
-                AxTuple,
+                tuple[bool, CocoaSize],
                 cast(
                     object,
                     HIServices.AXValueGetValue(
@@ -995,7 +978,7 @@ class MacOS:
         )
         if not result.ok:
             return None
-        return AxSize.parse(cast(CocoaSize, result.value))
+        return AxSize.parse(result.value)
 
     @staticmethod
     def ax_frame(window: AxElement) -> Rect | None:
@@ -1535,7 +1518,7 @@ class WindowDaemon:
             observer: AxElement,
             element: AxElement,
             notification: str,
-            refcon: AxRawValue,
+            refcon: AxAttributeValue,
         ) -> None:
             self._ax_callback(observer, element, notification, refcon)
 
@@ -1663,7 +1646,7 @@ class WindowDaemon:
             print(f"{source}: {request_summary(request)} -> {message}", flush=True)
         return IpcResponse(ok=True, message=message)
 
-    def _tick(self, _timer: TimerHandle, _info: AxRawValue) -> None:
+    def _tick(self, _timer: TimerHandle, _info: AxAttributeValue) -> None:
         with self.lock:
             self._drain_ipc_calls()
             if not self.running:
@@ -1750,9 +1733,9 @@ class WindowDaemon:
 
     def _observe_app(self, *, pid: int) -> None:
         app = cast(AxElement, HIServices.AXUIElementCreateApplication(pid))
-        result = AxCopyValue.parse(
+        result = AxCopyValue[AxError, AxElement].parse(
             cast(
-                AxTuple,
+                tuple[AxError, AxElement],
                 cast(
                     object,
                     HIServices.AXObserverCreate(pid, self.ax_callback, None),
@@ -1761,7 +1744,7 @@ class WindowDaemon:
         )
         if result.error != HIServices.kAXErrorSuccess:
             return
-        observer = cast(AxElement, result.value)
+        observer = result.value
         self.observers[pid] = AppObserver(pid=pid, app=app, observer=observer)
         _ = CoreFoundation.CFRunLoopAddSource(
             self.run_loop or CoreFoundation.CFRunLoopGetCurrent(),
@@ -1813,7 +1796,7 @@ class WindowDaemon:
         _observer: AxElement,
         _element: AxElement,
         notification: str,
-        _refcon: AxRawValue,
+        _refcon: AxAttributeValue,
     ) -> None:
         if notification in cast(
             tuple[AxNotification, ...],
