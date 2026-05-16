@@ -1025,6 +1025,15 @@ class MacApi:
                 pids.append(pid)
         return tuple(sorted(set(pids)))
 
+    def frontmost_pid(self) -> int | None:
+        app = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None
+        pid = int(app.processIdentifier())
+        if pid <= 0 or pid == os.getpid():
+            return None
+        return pid
+
     def visible_window_index(self) -> VisibleWindowIndex:
         options = (
             self.quartz.kCGWindowListOptionOnScreenOnly
@@ -1069,16 +1078,51 @@ class MacApi:
 
     def focused_window(self) -> WindowInfo | None:
         system = self.hiservices.AXUIElementCreateSystemWide()
-        window = self.ax_get(system, self.hiservices.kAXFocusedWindowAttribute)
-        if window is None:
-            app = self.ax_get(system, self.hiservices.kAXFocusedApplicationAttribute)
-            if app is None:
-                return None
-            window = self.ax_get(app, self.hiservices.kAXFocusedWindowAttribute)
-        if window is None:
-            return None
+        app = self.ax_get(system, self.hiservices.kAXFocusedApplicationAttribute)
+        frontmost_pid = self.frontmost_pid()
+        if app is None and frontmost_pid is not None:
+            app = self.hiservices.AXUIElementCreateApplication(frontmost_pid)
+        app_pid = self.ax_pid(app) if app is not None else None
+        if app_pid is None:
+            app_pid = frontmost_pid
         windows = self.collect_windows()
+        candidate_windows = [
+            self.ax_get(system, self.hiservices.kAXFocusedWindowAttribute)
+        ]
+        if app is not None:
+            candidate_windows.extend(
+                (
+                    self.ax_get(app, self.hiservices.kAXFocusedWindowAttribute),
+                    self.ax_get(app, self.hiservices.kAXMainWindowAttribute),
+                )
+            )
+            raw_windows = self.ax_get(app, self.hiservices.kAXWindowsAttribute)
+            if raw_windows:
+                candidate_windows.extend(cast(Iterable[object], raw_windows))
+        for window in candidate_windows:
+            if window is None:
+                continue
+            info = self._focused_window_info(window, app_pid=app_pid, windows=windows)
+            if info is not None:
+                return info
+        if app_pid is None:
+            return None
+        return min(
+            (candidate for candidate in windows if candidate.pid == app_pid),
+            key=lambda candidate: candidate.order,
+            default=None,
+        )
+
+    def _focused_window_info(
+        self,
+        window: object,
+        *,
+        app_pid: int | None,
+        windows: tuple[WindowInfo, ...],
+    ) -> WindowInfo | None:
         pid = self.ax_pid(window)
+        if pid is None:
+            pid = app_pid
         number = self.window_number(window)
         for candidate in windows:
             if (
@@ -1090,10 +1134,27 @@ class MacApi:
         frame = self.ax_frame(window)
         if pid is None or frame is None:
             return None
-        return min(
+        nearest = min(
             (candidate for candidate in windows if candidate.pid == pid),
             key=lambda candidate: candidate.frame.distance_to(frame),
             default=None,
+        )
+        if nearest is not None:
+            return nearest
+        if not frame.valid_window_size:
+            return None
+        screen = screen_for_frame(frame, self.screens())
+        if screen is None:
+            return None
+        title = str(self.ax_get(window, self.hiservices.kAXTitleAttribute) or "")
+        return self._window_info_from_values(
+            window=window,
+            pid=pid,
+            title=title,
+            frame=frame,
+            screen=screen,
+            number=number,
+            order=None,
         )
 
     def collect_windows(self) -> tuple[WindowInfo, ...]:
@@ -1148,8 +1209,30 @@ class MacApi:
         if not visible_index.contains(pid=pid, number=number, frame=frame):
             return None
         title = str(self.ax_get(window, self.hiservices.kAXTitleAttribute) or "")
+        order = visible_index.order(pid=pid, number=number, frame=frame)
+        return self._window_info_from_values(
+            window=window,
+            pid=pid,
+            title=title,
+            frame=frame,
+            screen=screen,
+            number=number,
+            order=order,
+        )
+
+    def _window_info_from_values(
+        self,
+        *,
+        window: object,
+        pid: int,
+        title: str,
+        frame: Rect,
+        screen: ScreenInfo,
+        number: int | None,
+        order: int | None,
+    ) -> WindowInfo:
         stable_id = self.window_stable_id(window)
-        order = number if number is not None else stable_id
+        resolved_order = order if order is not None else stable_id
         key = f"{pid}:{number}" if number is not None else f"{pid}:fallback:{stable_id}"
         return WindowInfo(
             key=key,
@@ -1159,7 +1242,7 @@ class MacApi:
             frame=frame,
             screen_key=screen.key,
             window_number=number,
-            order=order,
+            order=resolved_order,
         )
 
     def window_number(self, window: object) -> int | None:
@@ -2228,6 +2311,112 @@ class _MemoryObjc:
         return decorate
 
 
+@dataclass(kw_only=True)
+class _FocusedWindowApi:
+    windows: tuple[WindowInfo, ...]
+    focused_app: object | None = "app"
+    system_focused: object | None = "focused"
+    app_focused: object | None = None
+    app_main: object | None = None
+    app_windows: tuple[object, ...] = ()
+    frontmost: int | None = 7
+    screen_values: tuple[ScreenInfo, ...] = (
+        ScreenInfo(key="s", frame=Rect(x=0, y=0, width=1000, height=500)),
+    )
+    hiservices: object = field(default_factory=lambda: _FocusedHiservices())  # noqa: PLW0108
+
+    def collect_windows(self) -> tuple[WindowInfo, ...]:
+        return self.windows
+
+    def ax_get(self, element: object, attribute: object) -> object | None:
+        if element == "system" and attribute == "focused_application":
+            return self.focused_app
+        if element == "system" and attribute == "focused_window":
+            return self.system_focused
+        if element in {"app", "created-app"} and attribute == "focused_window":
+            return self.app_focused
+        if element in {"app", "created-app"} and attribute == "main_window":
+            return self.app_main
+        if element in {"app", "created-app"} and attribute == "windows":
+            return self.app_windows
+        if attribute == "title":
+            return str(element)
+        return None
+
+    def ax_pid(self, element: object) -> int | None:
+        if element in {"app", "created-app"}:
+            return 7
+        return None
+
+    def frontmost_pid(self) -> int | None:
+        return self.frontmost
+
+    def window_number(self, element: object) -> int | None:
+        if element in {"focused", "app-focused", "main", "listed"}:
+            return 11
+        return None
+
+    def ax_frame(self, element: object) -> Rect | None:
+        if element in {"focused", "app-focused", "main", "listed"}:
+            return Rect(x=10, y=10, width=100, height=100)
+        return None
+
+    def screens(self) -> tuple[ScreenInfo, ...]:
+        return self.screen_values
+
+    def window_stable_id(self, element: object) -> int:
+        return {"focused": 101, "app-focused": 102, "main": 103}.get(str(element), 999)
+
+    def _focused_window_info(
+        self,
+        window: object,
+        *,
+        app_pid: int | None,
+        windows: tuple[WindowInfo, ...],
+    ) -> WindowInfo | None:
+        return MacApi._focused_window_info(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            cast(MacApi, self), window, app_pid=app_pid, windows=windows
+        )
+
+    def _window_info_from_values(
+        self,
+        *,
+        window: object,
+        pid: int,
+        title: str,
+        frame: Rect,
+        screen: ScreenInfo,
+        number: int | None,
+        order: int | None,
+    ) -> WindowInfo:
+        return MacApi._window_info_from_values(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            cast(MacApi, self),
+            window=window,
+            pid=pid,
+            title=title,
+            frame=frame,
+            screen=screen,
+            number=number,
+            order=order,
+        )
+
+
+class _FocusedHiservices:
+    kAXFocusedApplicationAttribute: ClassVar[str] = "focused_application"  # noqa: N815
+    kAXFocusedWindowAttribute: ClassVar[str] = "focused_window"  # noqa: N815
+    kAXMainWindowAttribute: ClassVar[str] = "main_window"  # noqa: N815
+    kAXWindowsAttribute: ClassVar[str] = "windows"  # noqa: N815
+    kAXTitleAttribute: ClassVar[str] = "title"  # noqa: N815
+
+    @staticmethod
+    def AXUIElementCreateSystemWide() -> str:  # noqa: N802
+        return "system"
+
+    @staticmethod
+    def AXUIElementCreateApplication(_pid: int) -> str:  # noqa: N802
+        return "created-app"
+
+
 class _Test:
     @staticmethod
     def screen(
@@ -2249,16 +2438,18 @@ class _Test:
         width: int = 100,
         height: int = 100,
         screen_key: str = "s",
+        pid: int = 1,
+        number: int | None = None,
         order: int = 0,
     ) -> WindowInfo:
         return WindowInfo(
             key=key,
-            pid=1,
+            pid=pid,
             ax=None,
             title=key,
             frame=Rect(x=x, y=y, width=width, height=height),
             screen_key=screen_key,
-            window_number=order,
+            window_number=order if number is None else number,
             order=order,
         )
 
@@ -2284,6 +2475,7 @@ class _Test:
 
 __test__: dict[str, object] = {
     "_Test": _Test,
+    "_FocusedWindowApi": _FocusedWindowApi,
     "rect_geometry": """
 >>> rect = Rect(x=10, y=20, width=30, height=40)
 >>> (rect.right, rect.bottom, rect.center_x, rect.center_y)
@@ -2420,6 +2612,13 @@ ValueError: unknown direction: north
 True
 >>> parse_binding_command("close")
 IpcRequest(kind='close', direction=None, desktop=None, columns=None)
+>>> chrome = _Test.window("7:11", x=10, y=10, pid=7, number=11, order=0)
+>>> api = _FocusedWindowApi(windows=(chrome,))
+>>> MacApi.focused_window(cast(MacApi, api)).key
+'7:11'
+>>> api = _FocusedWindowApi(windows=(), system_focused=None, app_main="main")
+>>> MacApi.focused_window(cast(MacApi, api)).key
+'7:11'
 >>> parse_cli_args(["daemon"]).poll_seconds
 'disabled'
 >>> parse_cli_args(["daemon", "--poll-seconds", "5"]).poll_seconds
