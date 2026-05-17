@@ -797,8 +797,7 @@ class AxNotifications:
     def app() -> tuple[AxAttribute, ...]:
         return (
             HIServices.kAXWindowCreatedNotification,
-            HIServices.kAXFocusedWindowChangedNotification,
-            HIServices.kAXMainWindowChangedNotification,
+            *AxNotifications.focus_changed(),
         )
 
     @staticmethod
@@ -831,6 +830,21 @@ class AxNotifications:
             HIServices.kAXResizedNotification,
             HIServices.kAXWindowMovedNotification,
             HIServices.kAXWindowResizedNotification,
+        )
+
+    @staticmethod
+    def focus_changed() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXFocusedWindowChangedNotification,
+            HIServices.kAXMainWindowChangedNotification,
+            HIServices.kAXFocusedUIElementChangedNotification,
+        )
+
+    @staticmethod
+    def window_disappeared() -> tuple[AxAttribute, ...]:
+        return (
+            HIServices.kAXUIElementDestroyedNotification,
+            HIServices.kAXWindowMiniaturizedNotification,
         )
 
 
@@ -1438,9 +1452,11 @@ class WindowDaemon:
         self.tick_timer: TimerHandle | None = None
         self.next_periodic_at: float | None = None
         self.retile_at: float | None = None
+        self.focus_check_at: float | None = None
         self.capture_row_weights_at_retile: bool = False
         self.ignore_events_until: float = 0.0
         self.run_loop: RunLoopHandle | None = None
+        self.last_focused_window: WindowInfo | None = None
 
     def _make_ax_callback(self) -> AxCallback:
         def callback(
@@ -1463,6 +1479,7 @@ class WindowDaemon:
             self.keybinding_manager.start()
         self.refresh_observers()
         self.retile()
+        self._remember_focused_window()
         if self.config.poll_seconds != "disabled":
             self.next_periodic_at = time.monotonic() + self.config.poll_seconds
         self._install_tick_timer()
@@ -1592,6 +1609,9 @@ class WindowDaemon:
             if self.retile_at is not None and now >= self.retile_at:
                 self.retile_at = None
                 self.retile()
+            if self.focus_check_at is not None and now >= self.focus_check_at:
+                self.focus_check_at = None
+                self._sync_or_repair_focus()
 
     def _drain_ipc_calls(self) -> None:
         while True:
@@ -1715,6 +1735,11 @@ class WindowDaemon:
     ) -> None:
         if notification in AxNotifications.refresh_observers():
             self.refresh_observers()
+        if notification in AxNotifications.focus_changed():
+            self._remember_focused_window()
+            self.schedule_focus_check()
+        elif notification in AxNotifications.window_disappeared():
+            self.schedule_focus_check()
         self.schedule_retile(
             capture_row_weights=notification in AxNotifications.capture_row_weights()
         )
@@ -1729,6 +1754,15 @@ class WindowDaemon:
         target = now + self.EVENT_QUIET_SECONDS
         self.retile_at = (
             target if self.retile_at is None else min(self.retile_at, target)
+        )
+        self._wake_run_loop()
+
+    def schedule_focus_check(self) -> None:
+        target = time.monotonic() + self.EVENT_QUIET_SECONDS
+        self.focus_check_at = (
+            target
+            if self.focus_check_at is None
+            else max(self.focus_check_at, target)
         )
         self._wake_run_loop()
 
@@ -1857,6 +1891,38 @@ class WindowDaemon:
             (window for window in MacOS.collect_windows() if window.key == key),
             None,
         )
+
+    def _remember_focused_window(self) -> None:
+        focused = MacOS.focused_window()
+        if focused is None:
+            return
+        self.last_focused_window = focused
+
+    def _sync_or_repair_focus(self) -> None:
+        windows = MacOS.collect_windows()
+        visible_keys = {window.key for window in windows}
+        focused = MacOS.focused_window()
+        if focused is not None and focused.key in visible_keys:
+            self.last_focused_window = focused
+            return
+        closed = self.last_focused_window
+        if closed is None:
+            return
+        if closed.key in visible_keys:
+            return
+        frontmost_pid = MacOS.frontmost_pid()
+        if frontmost_pid is not None and frontmost_pid != closed.pid:
+            return
+        replacement = min(
+            (window for window in windows if window.screen_key == closed.screen_key),
+            key=lambda window: closed.frame.distance_to(window.frame),
+            default=None,
+        )
+        if replacement is None and len(windows) > 0:
+            replacement = windows[0]
+        if replacement is not None:
+            MacOS.focus_window(replacement)
+            self.last_focused_window = replacement
 
     def _arranged_windows(
         self, *, windows: tuple[WindowInfo, ...]
