@@ -65,6 +65,7 @@ CommandKind = Literal[
     "status",
     "stop",
 ]
+WorkKind = Literal["periodic", "retile", "focus-check"]
 SimpleCommand = Literal["fullscreen", "close", "retile", "status", "stop"]
 CliCommand = Literal[
     "daemon",
@@ -1425,7 +1426,6 @@ class WindowDaemon:
     EVENT_QUIET_SECONDS: ClassVar[float] = 0.15
     SOCKET_TIMEOUT_SECONDS: ClassVar[float] = 0.5
     IPC_RESPONSE_TIMEOUT_SECONDS: ClassVar[float] = 10.0
-    TICK_SECONDS: ClassVar[float] = 0.05
 
     def __init__(
         self,
@@ -1449,10 +1449,8 @@ class WindowDaemon:
         )
         self.running: bool = False
         self.ipc_thread: threading.Thread | None = None
-        self.tick_timer: TimerHandle | None = None
-        self.next_periodic_at: float | None = None
-        self.retile_at: float | None = None
-        self.focus_check_at: float | None = None
+        self.work_timer: TimerHandle | None = None
+        self.work_deadlines: dict[WorkKind, float] = {}
         self.capture_row_weights_at_retile: bool = False
         self.ignore_events_until: float = 0.0
         self.run_loop: RunLoopHandle | None = None
@@ -1480,9 +1478,12 @@ class WindowDaemon:
         self.refresh_observers()
         self.retile()
         self._remember_focused_window()
-        if self.config.poll_seconds != "disabled":
-            self.next_periodic_at = time.monotonic() + self.config.poll_seconds
-        self._install_tick_timer()
+        with self.lock:
+            if self.config.poll_seconds != "disabled":
+                self.work_deadlines["periodic"] = (
+                    time.monotonic() + self.config.poll_seconds
+                )
+            self._reschedule_work_timer_locked()
         _ = CoreFoundation.CFRunLoopRun()
         self.running = False
         self._cleanup()
@@ -1512,20 +1513,33 @@ class WindowDaemon:
         thread.start()
         self.ipc_thread = thread
 
-    def _install_tick_timer(self) -> None:
-        run_loop = self.run_loop or CoreFoundation.CFRunLoopGetCurrent()
-        self.tick_timer = CoreFoundation.CFRunLoopTimerCreate(
+    def _reschedule_work_timer_locked(self) -> None:
+        if self.work_timer is not None:
+            _ = CoreFoundation.CFRunLoopTimerInvalidate(self.work_timer)
+            self.work_timer = None
+        if self.run_loop is None or not self.running:
+            return
+        now = time.monotonic()
+        deadline = (
+            now
+            if not self.pending_ipc_calls.empty()
+            else min(self.work_deadlines.values(), default=None)
+        )
+        if deadline is None:
+            return
+        self.work_timer = CoreFoundation.CFRunLoopTimerCreate(
             None,
-            float(CoreFoundation.CFAbsoluteTimeGetCurrent()) + self.TICK_SECONDS,
-            self.TICK_SECONDS,
+            float(CoreFoundation.CFAbsoluteTimeGetCurrent())
+            + max(0.0, deadline - now),
+            0.0,
             0,
             0,
-            self._tick,
+            self._run_scheduled_work,
             None,
         )
         _ = CoreFoundation.CFRunLoopAddTimer(
-            run_loop,
-            self.tick_timer,
+            self.run_loop,
+            self.work_timer,
             CoreFoundation.kCFRunLoopCommonModes,
         )
 
@@ -1553,7 +1567,7 @@ class WindowDaemon:
             return IpcResponse(ok=False, message="daemon is stopping")
         call = PendingIpcCall(payload=payload, source="ipc")
         self.pending_ipc_calls.put(call)
-        self._wake_run_loop()
+        self.schedule_queued_work()
         return call.wait(timeout=self.IPC_RESPONSE_TIMEOUT_SECONDS)
 
     def submit_keybinding(self, request: IpcRequest) -> None:
@@ -1561,11 +1575,27 @@ class WindowDaemon:
             self.pending_ipc_calls.put(
                 PendingIpcCall(payload=request.dumps(), source="keybinding")
             )
-            self._wake_run_loop()
+            self.schedule_queued_work()
 
     def _wake_run_loop(self) -> None:
         if self.run_loop is not None:
             _ = CoreFoundation.CFRunLoopWakeUp(self.run_loop)
+
+    def schedule_queued_work(self) -> None:
+        with self.lock:
+            self._reschedule_work_timer_locked()
+        self._wake_run_loop()
+
+    def _schedule_deadline(
+        self, kind: WorkKind, deadline: float, *, latest: bool = False
+    ) -> None:
+        with self.lock:
+            current = self.work_deadlines.get(kind)
+            if current is not None:
+                deadline = max(current, deadline) if latest else min(current, deadline)
+            self.work_deadlines[kind] = deadline
+            self._reschedule_work_timer_locked()
+        self._wake_run_loop()
 
     @staticmethod
     def _read_client_payload(client: socket.socket) -> str:
@@ -1591,27 +1621,33 @@ class WindowDaemon:
             print(f"{source}: {request_summary(request)} -> {message}", flush=True)
         return IpcResponse(ok=True, message=message)
 
-    def _tick(self, _timer: TimerHandle, _info: ObjCValue) -> None:
+    def _run_scheduled_work(self, timer: TimerHandle, _info: ObjCValue) -> None:
         with self.lock:
+            if self.work_timer is timer:
+                self.work_timer = None
             self._drain_ipc_calls()
             if not self.running:
                 return
             now = time.monotonic()
-            if self.next_periodic_at is not None and now >= self.next_periodic_at:
+            if self._pop_due_work("periodic", now=now):
                 self.refresh_observers()
                 self.retile()
                 poll_seconds = self.config.poll_seconds
-                self.next_periodic_at = (
-                    None if poll_seconds == "disabled" else now + poll_seconds
-                )
-                self.retile_at = None
-                return
-            if self.retile_at is not None and now >= self.retile_at:
-                self.retile_at = None
+                if poll_seconds != "disabled":
+                    self.work_deadlines["periodic"] = now + poll_seconds
+                _ = self.work_deadlines.pop("retile", None)
+            if self._pop_due_work("retile", now=now):
                 self.retile()
-            if self.focus_check_at is not None and now >= self.focus_check_at:
-                self.focus_check_at = None
+            if self._pop_due_work("focus-check", now=now):
                 self._sync_or_repair_focus()
+            self._reschedule_work_timer_locked()
+
+    def _pop_due_work(self, kind: WorkKind, *, now: float) -> bool:
+        deadline = self.work_deadlines.get(kind)
+        if deadline is None or now < deadline:
+            return False
+        del self.work_deadlines[kind]
+        return True
 
     def _drain_ipc_calls(self) -> None:
         while True:
@@ -1745,26 +1781,21 @@ class WindowDaemon:
         )
 
     def schedule_retile(self, *, capture_row_weights: bool = False) -> None:
-        now = time.monotonic()
-        if now < self.ignore_events_until:
-            return
-        self.capture_row_weights_at_retile = (
-            self.capture_row_weights_at_retile or capture_row_weights
-        )
-        target = now + self.EVENT_QUIET_SECONDS
-        self.retile_at = (
-            target if self.retile_at is None else min(self.retile_at, target)
-        )
-        self._wake_run_loop()
+        with self.lock:
+            now = time.monotonic()
+            if now < self.ignore_events_until:
+                return
+            self.capture_row_weights_at_retile = (
+                self.capture_row_weights_at_retile or capture_row_weights
+            )
+        self._schedule_deadline("retile", now + self.EVENT_QUIET_SECONDS)
 
     def schedule_focus_check(self) -> None:
-        target = time.monotonic() + self.EVENT_QUIET_SECONDS
-        self.focus_check_at = (
-            target
-            if self.focus_check_at is None
-            else max(self.focus_check_at, target)
+        self._schedule_deadline(
+            "focus-check",
+            time.monotonic() + self.EVENT_QUIET_SECONDS,
+            latest=True,
         )
-        self._wake_run_loop()
 
     def retile(self) -> None:
         with self.lock:
@@ -1939,8 +1970,9 @@ class WindowDaemon:
     def _cleanup(self) -> None:
         if self.keybinding_manager is not None:
             self.keybinding_manager.stop()
-        if self.tick_timer is not None:
-            _ = CoreFoundation.CFRunLoopTimerInvalidate(self.tick_timer)
+        if self.work_timer is not None:
+            _ = CoreFoundation.CFRunLoopTimerInvalidate(self.work_timer)
+            self.work_timer = None
         self._answer_pending_calls(
             IpcResponse(ok=False, message="daemon stopped before handling request")
         )
