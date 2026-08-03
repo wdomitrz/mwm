@@ -3,6 +3,7 @@ LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 LAUNCHD_DOMAIN := gui/$(shell id -u)
 LOCAL_BIN := $(HOME)/.local/bin
 MWM_BIN := $(LOCAL_BIN)/mwm.py
+UV := $(shell command -v uv)
 
 .PHONY: all lint fix test install uninstall install_bin install_plist
 .SILENT:
@@ -32,7 +33,9 @@ install_plist:
 
 install_bin:
 	mkdir -p $(LOCAL_BIN)
+	test -n "$(UV)" || { echo "uv was not found on PATH" >&2; exit 1; }
 	cp mwm.py $(LOCAL_BIN)/mwm.py
+	sed -i '' '1s|^.*$$|#!/usr/bin/env -S $(UV) run --script|' $(MWM_BIN)
 
 uninstall:
 	-launchctl bootout $(LAUNCHD_DOMAIN) $(LAUNCHD_PLIST)

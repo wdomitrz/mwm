@@ -24,7 +24,6 @@ import os
 import plistlib
 import queue
 import shlex
-import shutil
 import signal
 import socket
 import sys
@@ -137,7 +136,7 @@ Quartz: DynamicObjC
 
 AxElement: TypeAlias = Hashable
 AxAttribute: TypeAlias = DynamicObjC | str
-ObjCValue: TypeAlias = None | bool | NumberLike | Hashable | DynamicObjC
+ObjCValue: TypeAlias = bool | NumberLike | Hashable | DynamicObjC | None
 AxCallback: TypeAlias = DynamicObjC
 RunLoopHandle: TypeAlias = DynamicObjC
 TimerHandle: TypeAlias = DynamicObjC
@@ -2421,7 +2420,6 @@ class ClientArgs:
 @dataclass(frozen=True, kw_only=True)
 class LaunchdPlistArgs:
     label: str
-    uv: Path
     mwm_bin: Path
     workdir: Path
     stdout_log: Path
@@ -2432,7 +2430,6 @@ class LaunchdPlistArgs:
     def add_parser(cls, subparsers: Subparsers) -> None:
         parser = subparsers.add_parser("launchd-plist")
         _ = parser.add_argument("--label", default=Launchd.LABEL)
-        _ = parser.add_argument("--uv", type=Path, default=None)
         _ = parser.add_argument("--mwm-bin", type=Path, default=None)
         _ = parser.add_argument("--workdir", type=Path, default=None)
         _ = parser.add_argument("--stdout-log", type=Path, default=None)
@@ -2441,13 +2438,9 @@ class LaunchdPlistArgs:
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> LaunchdPlistArgs:
-        defaults = cls.default(
-            uv=cast(Path | None, args.uv),
-            label=cast(str, args.label),
-        )
+        defaults = cls.default(label=cast(str, args.label))
         return cls(
             label=defaults.label,
-            uv=defaults.uv,
             mwm_bin=cast(Path | None, args.mwm_bin) or defaults.mwm_bin,
             workdir=cast(Path | None, args.workdir) or defaults.workdir,
             stdout_log=cast(Path | None, args.stdout_log) or defaults.stdout_log,
@@ -2459,7 +2452,6 @@ class LaunchdPlistArgs:
     def default(
         cls,
         *,
-        uv: Path | None = None,
         label: str = Launchd.LABEL,
     ) -> LaunchdPlistArgs:
         home = Path.home()
@@ -2467,7 +2459,6 @@ class LaunchdPlistArgs:
         log_dir = Path("/") / "tmp"
         return cls(
             label=label,
-            uv=uv or cls.default_uv_path(),
             mwm_bin=home / Launchd.LOCAL_BIN_NAME,
             workdir=home,
             stdout_log=log_dir / f"mwm_{user}.out.log",
@@ -2476,17 +2467,9 @@ class LaunchdPlistArgs:
         )
 
     @staticmethod
-    def default_uv_path() -> Path:
-        uv = shutil.which("uv")
-        if uv is None:
-            raise SystemExit("uv was not found on PATH; install uv or pass --uv PATH")
-        return Path(uv)
-
-    @staticmethod
     def plist(
         *,
         label: str,
-        uv: Path,
         mwm_bin: Path,
         workdir: Path,
         stdout_log: Path,
@@ -2496,20 +2479,19 @@ class LaunchdPlistArgs:
 
         >>> plist = LaunchdPlistArgs.plist(
         ...     label="mwm",
-        ...     uv=Path("/usr/local/bin/uv"),
         ...     mwm_bin=Path("/Users/me/.local/bin/mwm.py"),
         ...     workdir=Path("/Users/me"),
         ...     stdout_log=Path("/tmp/mwm_me.out.log"),
         ...     stderr_log=Path("/tmp/mwm_me.err.log"),
         ... )
         >>> plist["ProgramArguments"]
-        ['/usr/local/bin/uv', 'run', '/Users/me/.local/bin/mwm.py', 'daemon']
+        ['/Users/me/.local/bin/mwm.py', 'daemon']
         >>> plist["StandardErrorPath"]
         '/tmp/mwm_me.err.log'
         """
         return {
             "Label": label,
-            "ProgramArguments": [str(uv), "run", str(mwm_bin), "daemon"],
+            "ProgramArguments": [str(mwm_bin), "daemon"],
             "WorkingDirectory": str(workdir),
             "RunAtLoad": True,
             "KeepAlive": False,
@@ -2521,7 +2503,6 @@ class LaunchdPlistArgs:
         payload = plistlib.dumps(
             self.plist(
                 label=self.label,
-                uv=self.uv,
                 mwm_bin=self.mwm_bin,
                 workdir=self.workdir,
                 stdout_log=self.stdout_log,
