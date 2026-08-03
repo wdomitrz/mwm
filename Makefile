@@ -34,8 +34,8 @@ install_plist:
 install_bin:
 	mkdir -p $(LOCAL_BIN)
 	test -n "$(UV)" || { echo "uv was not found on PATH" >&2; exit 1; }
-	cp mwm.py $(LOCAL_BIN)/mwm.py
-	sed -i '' '1s|^.*$$|#!/usr/bin/env -S $(UV) run --script|' $(MWM_BIN)
+	{ printf '%s\n' '#!$(UV) run --script'; tail -n +2 mwm.py; } > $(MWM_BIN)
+	chmod +x $(MWM_BIN)
 
 uninstall: uninstall_plist uninstall_bin
 
