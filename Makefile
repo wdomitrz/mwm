@@ -5,7 +5,7 @@ LOCAL_BIN := $(HOME)/.local/bin
 MWM_BIN := $(LOCAL_BIN)/mwm.py
 UV := $(shell command -v uv)
 
-.PHONY: all lint fix test install uninstall install_bin install_plist
+.PHONY: all lint fix test install uninstall install_bin install_plist uninstall_bin uninstall_plist
 .SILENT:
 
 all: fix lint test
@@ -37,6 +37,11 @@ install_bin:
 	cp mwm.py $(LOCAL_BIN)/mwm.py
 	sed -i '' '1s|^.*$$|#!/usr/bin/env -S $(UV) run --script|' $(MWM_BIN)
 
-uninstall:
+uninstall: uninstall_plist uninstall_bin
+
+uninstall_plist:
 	-launchctl bootout $(LAUNCHD_DOMAIN) $(LAUNCHD_PLIST)
-	rm -f $(LAUNCHD_PLIST) $(LOCAL_BIN)/mwm.py
+	rm -f $(LAUNCHD_PLIST)
+
+uninstall_bin:
+	rm -f $(LOCAL_BIN)/mwm.py
