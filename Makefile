@@ -33,7 +33,7 @@ install_plist: install_bin
 
 install_bin:
 	mkdir -p $(LOCAL_BIN)
-	uv run --with pyinstaller --with-requirements mwm.py pyinstaller --noconfirm --onefile --distpath $(LOCAL_BIN) mwm.py
+	uv run --with pyinstaller --with-requirements mwm.py pyinstaller --noconfirm --onefile --log-level WARN --distpath $(LOCAL_BIN) mwm.py
 
 uninstall: uninstall_plist uninstall_bin
 
