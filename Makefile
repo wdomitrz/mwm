@@ -22,7 +22,7 @@ test:
 clean:
 	rm -rf build dist .ruff_cache __pycache__ *.spec
 
-install: install_plist
+install: install_bin install_plist
 
 install_plist: install_bin
 	mkdir -p $(HOME)/Library/LaunchAgents
@@ -43,4 +43,3 @@ uninstall_plist:
 
 uninstall_bin:
 	rm -f $(LOCAL_BIN)/mwm
-
