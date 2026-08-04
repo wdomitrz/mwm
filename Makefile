@@ -2,8 +2,6 @@ LAUNCHD_LABEL := mwm
 LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 LAUNCHD_DOMAIN := gui/$(shell id -u)
 LOCAL_BIN := $(HOME)/.local/bin
-MWM_BIN := $(LOCAL_BIN)/mwm
-PYINSTALLER_WORK := /tmp/mwm-pyinstaller-$(shell id -u)
 
 .PHONY: all lint fix test clean install uninstall install_bin install_plist uninstall_bin uninstall_plist
 .SILENT:
@@ -19,26 +17,23 @@ fix:
 	uv run ruff format --quiet .
 
 test:
-	uv run python -m doctest README.md $(wildcard *.py)
+	uv run python -m doctest README.md *.py
 
 clean:
-	rm -rf $(PYINSTALLER_WORK)
-	rm -rf build dist
-	rm -f *.spec
+	rm -rf build dist .ruff_cache __pycache__ *.spec
 
-install: install_bin install_plist
+install: install_plist
 
-install_plist:
+install_plist: install_bin
 	mkdir -p $(HOME)/Library/LaunchAgents
-	$(MWM_BIN) launchd-plist > $(LAUNCHD_PLIST)
+	$(LOCAL_BIN)/mwm launchd-plist > $(LAUNCHD_PLIST)
 	-launchctl bootout $(LAUNCHD_DOMAIN) $(LAUNCHD_PLIST)
 	launchctl bootstrap $(LAUNCHD_DOMAIN) $(LAUNCHD_PLIST)
 	launchctl kickstart -k $(LAUNCHD_DOMAIN)/$(LAUNCHD_LABEL)
 
 install_bin:
 	mkdir -p $(LOCAL_BIN)
-	mkdir -p $(PYINSTALLER_WORK)/build $(PYINSTALLER_WORK)/spec
-	uv run --with pyinstaller --with-requirements mwm.py pyinstaller --noconfirm --onefile --name mwm --distpath $(LOCAL_BIN) --workpath $(PYINSTALLER_WORK)/build --specpath $(PYINSTALLER_WORK)/spec mwm.py
+	uv run --with pyinstaller --with-requirements mwm.py pyinstaller --noconfirm --onefile --distpath $(LOCAL_BIN) mwm.py
 
 uninstall: uninstall_plist uninstall_bin
 
@@ -48,3 +43,4 @@ uninstall_plist:
 
 uninstall_bin:
 	rm -f $(LOCAL_BIN)/mwm
+
