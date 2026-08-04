@@ -24,6 +24,7 @@ alt-1/2/3/.../0                          switch to Desktop 1/2/3/.../10
 shift-alt-q                              close focused window
 alt-f                                    fullscreen
 alt-r                                    retile
+shift-alt-r                              restart
 ctrl-alt-1/2/3/4/5                       columns 1/2/3/2.5/1.7
 ctrl-alt-s                               status
 ```
@@ -42,4 +43,5 @@ mwm columns 3
 mwm retile
 mwm status --verbose
 mwm stop
+mwm restart
 ```
