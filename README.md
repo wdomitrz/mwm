@@ -11,6 +11,7 @@ make install
 Grant Accessibility permission if macOS asks for it.
 
 ```sh
+mwm status --verbose
 make uninstall
 ```
 
@@ -30,15 +31,15 @@ ctrl-alt-s                               status
 ## Commands
 
 ```sh
-./mwm.py daemon
-./mwm.py daemon --poll-seconds 30
-./mwm.py focus left
-./mwm.py move right
-./mwm.py goto-desktop 2
-./mwm.py close
-./mwm.py fullscreen
-./mwm.py columns 3
-./mwm.py retile
-./mwm.py status --verbose
-./mwm.py stop
+mwm daemon
+mwm daemon --poll-seconds 30
+mwm focus left
+mwm move right
+mwm goto-desktop 2
+mwm close
+mwm fullscreen
+mwm columns 3
+mwm retile
+mwm status --verbose
+mwm stop
 ```

@@ -89,7 +89,7 @@ Plist: TypeAlias = dict[str, PlistValue]
 
 class Launchd:
     LABEL: ClassVar[str] = "mwm"
-    LOCAL_BIN_NAME: ClassVar[str] = ".local/bin/mwm.py"
+    LOCAL_BIN_NAME: ClassVar[str] = ".local/bin/mwm"
 
 
 class DesktopShortcut:
@@ -2479,13 +2479,13 @@ class LaunchdPlistArgs:
 
         >>> plist = LaunchdPlistArgs.plist(
         ...     label="mwm",
-        ...     mwm_bin=Path("/Users/me/.local/bin/mwm.py"),
+        ...     mwm_bin=Path("/Users/me/.local/bin/mwm"),
         ...     workdir=Path("/Users/me"),
         ...     stdout_log=Path("/tmp/mwm_me.out.log"),
         ...     stderr_log=Path("/tmp/mwm_me.err.log"),
         ... )
         >>> plist["ProgramArguments"]
-        ['/Users/me/.local/bin/mwm.py', 'daemon']
+        ['/Users/me/.local/bin/mwm', 'daemon']
         >>> plist["StandardErrorPath"]
         '/tmp/mwm_me.err.log'
         """

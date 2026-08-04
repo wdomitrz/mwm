@@ -2,10 +2,10 @@ LAUNCHD_LABEL := mwm
 LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 LAUNCHD_DOMAIN := gui/$(shell id -u)
 LOCAL_BIN := $(HOME)/.local/bin
-MWM_BIN := $(LOCAL_BIN)/mwm.py
-UV := $(shell command -v uv)
+MWM_BIN := $(LOCAL_BIN)/mwm
+PYINSTALLER_WORK := /tmp/mwm-pyinstaller-$(shell id -u)
 
-.PHONY: all lint fix test install uninstall install_bin install_plist uninstall_bin uninstall_plist
+.PHONY: all lint fix test clean install uninstall install_bin install_plist uninstall_bin uninstall_plist
 .SILENT:
 
 all: fix lint test
@@ -21,6 +21,10 @@ fix:
 test:
 	uv run python -m doctest README.md $(wildcard *.py)
 
+clean:
+	rm -rf $(PYINSTALLER_WORK)
+	rm -rf build dist
+	rm -f *.spec
 
 install: install_bin install_plist
 
@@ -33,9 +37,8 @@ install_plist:
 
 install_bin:
 	mkdir -p $(LOCAL_BIN)
-	test -n "$(UV)" || { echo "uv was not found on PATH" >&2; exit 1; }
-	{ printf '%s\n' '#!$(UV) run --script'; tail -n +2 mwm.py; } > $(MWM_BIN)
-	chmod +x $(MWM_BIN)
+	mkdir -p $(PYINSTALLER_WORK)/build $(PYINSTALLER_WORK)/spec
+	uv run --with pyinstaller --with-requirements mwm.py pyinstaller --noconfirm --onefile --name mwm --distpath $(LOCAL_BIN) --workpath $(PYINSTALLER_WORK)/build --specpath $(PYINSTALLER_WORK)/spec mwm.py
 
 uninstall: uninstall_plist uninstall_bin
 
@@ -44,4 +47,4 @@ uninstall_plist:
 	rm -f $(LAUNCHD_PLIST)
 
 uninstall_bin:
-	rm -f $(LOCAL_BIN)/mwm.py
+	rm -f $(LOCAL_BIN)/mwm
