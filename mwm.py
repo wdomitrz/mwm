@@ -63,9 +63,10 @@ CommandKind = Literal[
     "retile",
     "status",
     "stop",
+    "restart",
 ]
 WorkKind = Literal["periodic", "retile", "focus-check"]
-SimpleCommand = Literal["fullscreen", "close", "retile", "status", "stop"]
+SimpleCommand = Literal["fullscreen", "close", "retile", "status", "stop", "restart"]
 CliCommand = Literal[
     "daemon",
     "focus",
@@ -77,6 +78,7 @@ CliCommand = Literal[
     "retile",
     "status",
     "stop",
+    "restart",
     "launchd-plist",
 ]
 NumberLike = str | bytes | int | float
@@ -109,10 +111,11 @@ class DesktopShortcut:
 
 class CliCommands:
     FOCUS_MOVE: ClassVar[tuple[Literal["focus", "move"], ...]] = ("focus", "move")
-    UTILITY: ClassVar[tuple[Literal["retile", "status", "stop"], ...]] = (
+    UTILITY: ClassVar[tuple[Literal["retile", "status", "stop", "restart"], ...]] = (
         "retile",
         "status",
         "stop",
+        "restart",
     )
 
 
@@ -442,7 +445,7 @@ def load_ipc_request(data: str) -> IpcRequest:
             return GotoDesktopRequest(desktop=int(raw["desktop"]))
         case "columns":
             return ColumnsRequest(columns=float(raw["columns"]))
-        case "fullscreen" | "close" | "retile" | "status" | "stop":
+        case "fullscreen" | "close" | "retile" | "status" | "stop" | "restart":
             return SimpleRequest(kind=kind)
         case _:
             assert_never(kind)
@@ -642,6 +645,7 @@ def default_keybindings() -> tuple[KeyBinding, ...]:
             "shift-alt-q": "close",
             "alt-f": "fullscreen",
             "alt-r": "retile",
+            "shift-alt-r": "restart",
             "ctrl-alt-1": "columns 1",
             "ctrl-alt-2": "columns 2",
             "ctrl-alt-3": "columns 3",
@@ -694,7 +698,9 @@ def parse_binding_command(command: str) -> IpcRequest:
             return GotoDesktopRequest(desktop=int(desktop))
         case ["columns", columns]:
             return ColumnsRequest(columns=float(columns))
-        case [("fullscreen" | "close" | "retile" | "status" | "stop") as kind]:
+        case [
+            ("fullscreen" | "close" | "retile" | "status" | "stop" | "restart") as kind
+        ]:
             return SimpleRequest(kind=kind)
         case _:
             msg = f"invalid keybinding command: {command}"
@@ -1447,6 +1453,7 @@ class WindowDaemon:
             else None
         )
         self.running: bool = False
+        self.restarting: bool = False
         self.ipc_thread: threading.Thread | None = None
         self.work_timer: TimerHandle | None = None
         self.work_deadlines: dict[WorkKind, float] = {}
@@ -1486,6 +1493,9 @@ class WindowDaemon:
         _ = CoreFoundation.CFRunLoopRun()
         self.running = False
         self._cleanup()
+        if self.restarting:
+            args = sys.argv if getattr(sys, "frozen", False) else [sys.executable, *sys.argv]
+            os.execv(sys.executable, args)  # noqa: S606
         return 0
 
     def _install_signal_handlers(self) -> None:
@@ -1499,6 +1509,10 @@ class WindowDaemon:
         self.running = False
         run_loop = self.run_loop or CoreFoundation.CFRunLoopGetCurrent()
         _ = CoreFoundation.CFRunLoopStop(run_loop)
+
+    def restart(self) -> None:
+        self.restarting = True
+        self.stop()
 
     def _start_ipc(self) -> None:
         socket_path = self.config.socket_path
@@ -1528,8 +1542,7 @@ class WindowDaemon:
             return
         self.work_timer = CoreFoundation.CFRunLoopTimerCreate(
             None,
-            float(CoreFoundation.CFAbsoluteTimeGetCurrent())
-            + max(0.0, deadline - now),
+            float(CoreFoundation.CFAbsoluteTimeGetCurrent()) + max(0.0, deadline - now),
             0.0,
             0,
             0,
@@ -1687,6 +1700,9 @@ class WindowDaemon:
                         case "stop":
                             self.stop()
                             return "stopping"
+                        case "restart":
+                            self.restart()
+                            return "restarting"
                         case _:
                             assert_never(kind)
                 case _:
@@ -2386,7 +2402,7 @@ class ClientArgs:
                     socket_path=socket_path,
                     verbose=verbose,
                 )
-            case "fullscreen" | "close" | "retile" | "status" | "stop":
+            case "fullscreen" | "close" | "retile" | "status" | "stop" | "restart":
                 return cls(
                     request=SimpleRequest(kind=command),
                     socket_path=socket_path,
@@ -2551,6 +2567,7 @@ def cli_from_namespace(args: argparse.Namespace) -> ParsedCli:
             | "retile"
             | "status"
             | "stop"
+            | "restart"
             | "goto-desktop"
             | "columns"
         ):
