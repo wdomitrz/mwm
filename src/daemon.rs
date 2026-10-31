@@ -54,10 +54,8 @@ unsafe extern "C" {
     fn libc_getuid() -> u32;
 }
 
-/// What the CLI decided to do.
 #[derive(Debug, Clone, PartialEq)]
 enum Action {
-    /// Run the daemon.
     Daemon {
         columns: f64,
         socket: Option<PathBuf>,
@@ -65,18 +63,22 @@ enum Action {
         no_keybindings: bool,
         verbose: bool,
     },
-    /// Send one request to a running daemon.
     Send {
         request: Request,
         socket: Option<PathBuf>,
         verbose: bool,
     },
-    /// Print the `LaunchAgent` plist.
+    Install {
+        prefix: Option<PathBuf>,
+        label: Option<String>,
+        skip_launchctl: bool,
+        verbose: bool,
+    },
     LaunchdPlist {
         label: Option<String>,
         output: Option<PathBuf>,
     },
-    /// Print usage; `code` is the exit status.
+    /// Print usage; `code` is the exit status (0 for `--help`, else 2).
     Usage(i32),
 }
 
@@ -90,6 +92,7 @@ commands:
   goto-desktop <1-10> [--socket PATH]
   columns <number> [--socket PATH]
   fullscreen | close | retile | status | stop | restart [--socket PATH]
+  install [--prefix DIR] [--label LABEL] [--no-launchctl] [-v]
   launchd-plist [--label LABEL] [--output PATH]
 
 options:
@@ -97,7 +100,8 @@ options:
   -v, --verbose  print the daemon's answer
 ";
 
-/// Collapse the `Result` the client-option builder returns.
+/// Collapse the `Result` the client-option builder returns, so a bad
+/// argument reads as an `Action::Usage` rather than a separate error type.
 fn flatten(result: Result<Action, Action>) -> Action {
     result.unwrap_or_else(|action| action)
 }
@@ -146,6 +150,7 @@ fn parse_args(args: &[String]) -> Action {
         "status" => simple_client(rest, Request::Status),
         "stop" => simple_client(rest, Request::Stop),
         "restart" => simple_client(rest, Request::Restart),
+        "install" => parse_install(rest),
         "launchd-plist" => parse_launchd(rest),
         _ => Action::Usage(2),
     }
@@ -280,6 +285,51 @@ where
     build(&positional, socket, verbose)
 }
 
+/// The launchd label mwm installs itself under.
+const DEFAULT_LABEL: &str = "mwm";
+
+/// Where the binary installs itself: `~/.local/bin`.
+fn default_prefix() -> PathBuf {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    home.join(".local").join("bin")
+}
+
+fn parse_install(args: &[String]) -> Action {
+    let mut prefix = None;
+    let mut label = None;
+    let mut skip_launchctl = false;
+    let mut verbose = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--prefix" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Action::Usage(2);
+                };
+                prefix = Some(PathBuf::from(value));
+            }
+            "--label" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Action::Usage(2);
+                };
+                label = Some(value.clone());
+            }
+            "--no-launchctl" => skip_launchctl = true,
+            "--verbose" | "-v" => verbose = true,
+            _ => return Action::Usage(2),
+        }
+        index += 1;
+    }
+    Action::Install {
+        prefix,
+        label,
+        skip_launchctl,
+        verbose,
+    }
+}
+
 fn parse_launchd(args: &[String]) -> Action {
     let mut label_name = None;
     let mut destination = None;
@@ -310,7 +360,6 @@ fn parse_launchd(args: &[String]) -> Action {
     }
 }
 
-/// Entry point: turn a process argument vector into an exit code.
 pub fn cli_main<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
@@ -343,6 +392,17 @@ where
             send_request(&path, &request, verbose)
         }
         Action::LaunchdPlist { label, output } => write_plist(label.as_deref(), output.as_deref()),
+        Action::Install {
+            prefix,
+            label,
+            skip_launchctl,
+            verbose,
+        } => run_install(&InstallOptions {
+            prefix: prefix.map_or_else(default_prefix, PathBuf::from),
+            label: label.unwrap_or_else(|| DEFAULT_LABEL.to_string()),
+            skip_launchctl,
+            verbose,
+        }),
         Action::Daemon {
             columns,
             socket,
@@ -362,7 +422,6 @@ where
     }
 }
 
-/// Send one request to a running daemon and report its answer.
 fn send_request(path: &Path, request: &Request, verbose: bool) -> i32 {
     let response = match request_daemon(path, request) {
         Ok(response) => response,
@@ -406,9 +465,14 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The `LaunchAgent` plist for the installed binary.
+/// The plist for the conventional install location under `home`.
 fn launchd_plist_xml(label: &str, home: &Path) -> String {
-    let binary = home.join(".local/bin/mwm");
+    launchd_plist_xml_for(label, home, &home.join(".local/bin/mwm"))
+}
+
+/// The plist, naming the binary at `binary` so a custom `--prefix` is honoured.
+fn launchd_plist_xml_for(label: &str, home: &Path, binary: &Path) -> String {
+    let binary = binary.to_path_buf();
     let stdout = format!("/tmp/mwm_{}.out.log", uid());
     let stderr = format!("/tmp/mwm_{}.err.log", uid());
     format!(
@@ -448,7 +512,6 @@ fn write_plist(label: Option<&str>, output: Option<&Path>) -> i32 {
     0
 }
 
-/// How the daemon was started.
 #[derive(Debug, Clone, PartialEq)]
 struct DaemonConfig {
     columns: f64,
@@ -461,11 +524,10 @@ struct DaemonConfig {
 /// Something that can happen to the daemon.
 #[derive(Debug)]
 enum Event {
-    /// A request arrived from a key press.
+    /// A key press the binding map translated into a request.
     Request(Request),
     /// A client sent a raw payload and waits for an answer.
     Client(IpcMessage),
-    /// Windows changed on screen.
     WindowsChanged,
 }
 
@@ -479,21 +541,22 @@ struct IpcMessage {
 /// What the loop should do after handling an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Next {
-    /// Nothing further is due.
     Idle,
-    /// Re-apply the layout now.
     Retile,
 }
 
 /// The debounce state machine, kept pure so it can be tested without time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Scheduler {
-    /// When a retile should run, if one is pending.
+    /// `Some` when a retile is pending, holding the earliest deadline it may
+    /// run at. A later event never pulls that deadline earlier.
     due_ms: Option<u64>,
 }
 
 impl Scheduler {
-    /// Feed an event and return the action it implies.
+    /// Feed an event and return the action it implies. A window change pushes
+    /// the deadline out to `now + QUIET_MS`, which is the debounce: a burst of
+    /// them produces one retile once the burst stops.
     fn update(&mut self, now_ms: u64, event: &Event) -> Next {
         match event {
             Event::WindowsChanged => {
@@ -582,7 +645,8 @@ impl Core {
         format!("tiled {placed} of {} windows", windows.len())
     }
 
-    /// Remember how the user sized each column before we take over.
+    /// Record each window's current height as its row weight, so a column the
+    /// user sized by hand is not immediately flattened by the next retile.
     fn remember_row_weights(
         &mut self,
         columns: &[Vec<String>],
@@ -639,7 +703,6 @@ impl Core {
         }
     }
 
-    /// Move keyboard focus in a direction.
     fn focus(&mut self, direction: Direction) -> String {
         let Some(current) = self.system.focused_window() else {
             return "no focused window".to_string();
@@ -705,7 +768,6 @@ impl Core {
         }
     }
 
-    /// Close the focused window.
     fn close_focused(&mut self) -> String {
         let Some(current) = self.system.focused_window() else {
             return "no focused window".to_string();
@@ -719,7 +781,6 @@ impl Core {
         }
     }
 
-    /// A one-line description of the current state.
     fn status(&mut self) -> String {
         let windows = self.system.windows().map_or(0, |windows| windows.len());
         format!(
@@ -730,12 +791,14 @@ impl Core {
     }
 }
 
-/// Whether a window is large enough to be tiled rather than left alone.
+/// Whether a window is large enough to tile. Anything below the minimum
+/// keeps the geometry its app gave it.
 fn is_tilable(window: &WindowInfo) -> bool {
     window.frame.width >= MIN_WINDOW_WIDTH && window.frame.height >= MIN_WINDOW_HEIGHT
 }
 
-/// How a window is named in messages.
+/// The window's title for messages, falling back to its key when the app
+/// exposes no title.
 fn label_of(window: &WindowInfo) -> String {
     if window.title.is_empty() {
         window.key.clone()
@@ -744,7 +807,9 @@ fn label_of(window: &WindowInfo) -> String {
     }
 }
 
-/// Bind the socket, refusing to run twice on the same path.
+/// Bind the socket. A path that still has a listener on it means a daemon
+/// is already running and this one must refuse; a path with nobody listening
+/// is a stale socket from a crash and may be replaced.
 fn bind_socket(path: &Path) -> Result<UnixListener, String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -783,13 +848,142 @@ fn serve_client(core: &mut Core, message: &IpcMessage, verbose: bool) -> bool {
     stopping
 }
 
-/// The answer a stopping daemon gives.
 fn response_for(restarting: bool) -> IpcResponse {
     if restarting {
         IpcResponse::ok("restarting")
     } else {
         IpcResponse::ok("stopping")
     }
+}
+
+/// What `mwm install` was asked to do.
+struct InstallOptions {
+    prefix: PathBuf,
+    label: String,
+    /// Leave the agent unloaded (write the plist only).
+    skip_launchctl: bool,
+    verbose: bool,
+}
+
+/// Runs an external command. Injected so the launchctl steps can be tested
+/// without macOS.
+fn real_run(program: &str, arguments: &[String]) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(program).args(arguments).output()
+}
+
+/// Install the binary, write the agent file, and load it, using `$HOME` and
+/// the real command runner.
+fn run_install(options: &InstallOptions) -> i32 {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    run_install_with(options, &home, real_run)
+}
+
+/// The installer, with the home directory and command runner supplied.
+fn run_install_with<F>(options: &InstallOptions, home: &Path, run: F) -> i32
+where
+    F: Fn(&str, &[String]) -> std::io::Result<std::process::Output>,
+{
+    let installed = options.prefix.join("mwm");
+    let say = |message: &str| {
+        if options.verbose {
+            eprintln!("{message}");
+        }
+    };
+
+    if let Some(parent) = installed.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("cannot create {}: {error}", parent.display());
+            return 1;
+        }
+    }
+
+    // Prefer the running executable: it is the binary the user asked to
+    // install, whether it came from a release or from a build.
+    let source = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("cannot find the running mwm binary: {error}");
+            return 1;
+        }
+    };
+    if source != installed {
+        if let Err(error) = std::fs::copy(&source, &installed) {
+            eprintln!("cannot install to {}: {error}", installed.display());
+            return 1;
+        }
+        set_executable(&installed);
+        say(&format!("installed {}", installed.display()));
+    }
+
+    let plist_path = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{}.plist", options.label));
+    if let Some(parent) = plist_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("cannot create {}: {error}", parent.display());
+            return 1;
+        }
+    }
+    let plist = launchd_plist_xml_for(&options.label, home, &installed);
+    if let Err(error) = std::fs::write(&plist_path, plist) {
+        eprintln!("cannot write {}: {error}", plist_path.display());
+        return 1;
+    }
+    say(&format!("wrote {}", plist_path.display()));
+
+    if options.skip_launchctl {
+        say("not loading the agent (--no-launchctl)");
+        return 0;
+    }
+
+    let domain = format!("gui/{}", uid());
+    // Unload first, ignoring the failure: there may be nothing loaded, and a
+    // running agent would otherwise hold the old binary.
+    let _ = run(
+        "launchctl",
+        &[
+            "bootout".into(),
+            domain.clone(),
+            plist_path.display().to_string(),
+        ],
+    );
+    match run(
+        "launchctl",
+        &["bootstrap".into(), domain, plist_path.display().to_string()],
+    ) {
+        Ok(output) if output.status.success() => {
+            say("loaded the agent");
+            0
+        }
+        Ok(output) => {
+            eprintln!(
+                "the agent was written to {} but could not be loaded: {}",
+                plist_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            1
+        }
+        Err(error) => {
+            eprintln!(
+                "the agent was written to {} but could not be loaded: {error}",
+                plist_path.display()
+            );
+            1
+        }
+    }
+}
+
+/// Make an installed binary readable and executable by its owner and by
+/// everyone else — the usual `0755` for a program on your PATH.
+fn set_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Whether something is listening on `path` right now.
@@ -801,9 +995,8 @@ fn socket_answers(path: &Path) -> bool {
     true
 }
 
-/// Serve clients until the daemon stops.
-#[allow(clippy::too_many_lines)]
 /// Start the daemon and serve until it is told to stop.
+#[allow(clippy::too_many_lines)]
 fn run_daemon(config: &DaemonConfig) -> i32 {
     let system = system();
     if !system.accessibility_trusted() {
@@ -931,6 +1124,9 @@ fn spawn_server(listener: UnixListener, event_tx: &Sender<Event>) {
 }
 
 /// Read one request from a client, answer it, and close the connection.
+///
+/// The work happens on the event loop, so the answer arrives through `reply_rx`
+/// rather than being computed here.
 fn serve_one(stream: &UnixStream, event_tx: &Sender<Event>) {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(clone) => clone,
@@ -958,7 +1154,8 @@ fn serve_one(stream: &UnixStream, event_tx: &Sender<Event>) {
     }
 }
 
-/// Translate a key press into a request, when the map has one.
+/// Translate a key press into a request, when the map has one. Returning
+/// `true` consumes the key press so it never reaches the focused app.
 fn install_key_hook(core: &mut Core, bindings: &[KeyBinding], event_tx: &Sender<Event>) {
     let bindings = bindings.to_vec();
     let tx = event_tx.clone();
@@ -1497,6 +1694,195 @@ mod tests {
         std::fs::remove_file(&path).expect("cleanup");
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_copies_the_binary_writes_the_plist_and_loads_it() {
+        use std::sync::atomic::AtomicUsize;
+        let home = std::env::temp_dir().join(format!("mwm-install-{}", std::process::id()));
+        let prefix = home.join(".local/bin");
+        std::fs::create_dir_all(&prefix).expect("prefix");
+        let source = std::env::current_exe().expect("test binary");
+        std::fs::copy(&source, prefix.join("mwm")).expect("seed an existing install");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::clone(&calls);
+        let options = super::InstallOptions {
+            prefix: prefix.clone(),
+            label: "mwm".to_string(),
+            skip_launchctl: false,
+            verbose: false,
+        };
+        // `run_install_with` copies whatever binary it finds to the prefix, so
+        // this asserts against a temporary "binary" rather than the real one.
+        let code = super::run_install_with(&options, &home, |program, arguments| {
+            sink.lock()
+                .expect("lock")
+                .push((program.to_string(), arguments.join(" ")));
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(std::process::Output {
+                status: std::process::Command::new("true").status().expect("true"),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(code, 0);
+        let plist = home.join("Library/LaunchAgents/mwm.plist");
+        assert!(plist.is_file(), "the plist should be written");
+        let text = std::fs::read_to_string(&plist).expect("read");
+        assert!(text.contains("<key>Label</key>"));
+        assert!(text.contains(&prefix.join("mwm").display().to_string()));
+        let recorded = calls.lock().expect("lock").clone();
+        assert_eq!(recorded.len(), 2, "bootout then bootstrap: {recorded:?}");
+        assert_eq!(recorded[0].0, "launchctl");
+        assert!(recorded[0].1.starts_with("bootout gui/"));
+        assert!(recorded[1].1.starts_with("bootstrap gui/"));
+        assert!(prefix.join("mwm").is_file());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_can_stop_before_loading() {
+        let home = std::env::temp_dir().join(format!("mwm-install-skip-{}", std::process::id()));
+        let prefix = home.join(".local/bin");
+        std::fs::create_dir_all(&prefix).expect("prefix");
+        let calls = Arc::new(Mutex::new(0_usize));
+        let counter = Arc::clone(&calls);
+        let options = super::InstallOptions {
+            prefix,
+            label: "mwm".to_string(),
+            skip_launchctl: true,
+            verbose: false,
+        };
+        let code = super::run_install_with(&options, &home, |_, _| {
+            *counter.lock().expect("lock") += 1;
+            Ok(std::process::Output {
+                status: std::process::Command::new("true").status().expect("true"),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        });
+        assert_eq!(code, 0);
+        assert_eq!(*calls.lock().expect("lock"), 0, "launchctl must not run");
+        assert!(home.join("Library/LaunchAgents/mwm.plist").is_file());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_reports_a_failed_load_but_keeps_the_plist() {
+        let home = std::env::temp_dir().join(format!("mwm-install-fail-{}", std::process::id()));
+        let prefix = home.join(".local/bin");
+        std::fs::create_dir_all(&prefix).expect("prefix");
+        let options = super::InstallOptions {
+            prefix,
+            label: "mwm".to_string(),
+            skip_launchctl: false,
+            verbose: false,
+        };
+        let code = super::run_install_with(&options, &home, |_, _| {
+            Ok(std::process::Output {
+                status: std::process::Command::new("false").status().expect("false"),
+                stdout: Vec::new(),
+                stderr: b"no launchd here".to_vec(),
+            })
+        });
+        assert_eq!(code, 1, "a failed load is reported");
+        assert!(
+            home.join("Library/LaunchAgents/mwm.plist").is_file(),
+            "the plist is still written, so the user can load it by hand"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_uses_the_home_it_is_given() {
+        // The plist must land under the home directory it is given, never at
+        // `/Library`, which is what a missing `$HOME` would otherwise produce.
+        let home = std::env::temp_dir().join(format!("mwm-home-{}", std::process::id()));
+        let prefix = home.join(".local/bin");
+        std::fs::create_dir_all(&prefix).expect("prefix");
+        let options = super::InstallOptions {
+            prefix,
+            label: "mwm".to_string(),
+            skip_launchctl: true,
+            verbose: false,
+        };
+        let code = super::run_install_with(&options, &home, |_, _| unreachable!("not called"));
+        assert_eq!(code, 0);
+        assert!(
+            home.join("Library/LaunchAgents/mwm.plist").is_file(),
+            "the plist belongs under the home directory given"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_plist_names_the_binary_where_it_was_installed() {
+        let home = Path::new("/Users/me");
+        let elsewhere = Path::new("/opt/tools/bin/mwm");
+        let text = super::launchd_plist_xml_for("mwm", home, elsewhere);
+        assert!(text.contains("/opt/tools/bin/mwm"), "{text}");
+        assert!(!text.contains("/Users/me/.local/bin/mwm"), "{text}");
+        // The default wrapper still names the conventional location.
+        assert!(super::launchd_plist_xml("mwm", home).contains("/Users/me/.local/bin/mwm"));
+    }
+
+    #[test]
+    fn an_installed_binary_is_readable_and_runnable() {
+        let dir = std::env::temp_dir().join(format!("mwm-perms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("mwm");
+        std::fs::write(&path, b"#!/bin/sh\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        super::set_executable(&path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "got {mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_parses_its_options() {
+        assert_eq!(
+            parse_args(&args(&["install"])),
+            Action::Install {
+                prefix: None,
+                label: None,
+                skip_launchctl: false,
+                verbose: false
+            }
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "install",
+                "--prefix",
+                "/usr/local/bin",
+                "--label",
+                "wm",
+                "--no-launchctl"
+            ])),
+            Action::Install {
+                prefix: Some("/usr/local/bin".into()),
+                label: Some("wm".into()),
+                skip_launchctl: true,
+                verbose: false,
+            }
+        );
+        for bad in [
+            vec!["install", "--prefix"],
+            vec!["install", "--label"],
+            vec!["install", "--bogus"],
+            vec!["install", "extra"],
+        ] {
+            assert_eq!(parse_args(&args(&bad)), Action::Usage(2), "{bad:?}");
+        }
     }
 
     #[test]

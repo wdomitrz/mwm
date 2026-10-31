@@ -39,12 +39,10 @@ jobs:
           cargo test
           cargo build --release --locked
 
-      - name: Assemble the archive
-        run: |
-          mkdir -p dist
-          cp target/release/mwm dist/mwm-aarch64-apple-darwin
-          cp LICENSE.md README.md dist/
-          (cd dist && tar -czf ../mwm-aarch64-apple-darwin.tar.gz .)
+      # The release carries the binary and nothing else: it is renamed to show
+      # what it is, so a download is unambiguous.
+      - name: Name the binary
+        run: cp target/release/mwm mwm-aarch64-apple-darwin
 
       # A tag you pushed yourself keeps its name; a build from master is named
       # after its commit, so every release is distinguishable and nothing is
@@ -76,11 +74,8 @@ jobs:
             git log -1 --pretty=%s
             echo '```'
             echo
-            echo "Download \\`mwm-aarch64-apple-darwin.tar.gz\\` from the assets below, then:"
-            echo
-            echo '```sh'
-            echo "cargo install --path ."
-            echo '```'
+            echo "The asset is the \`mwm\` binary itself. Put it on your PATH and run it;"
+            echo "see the README for the rest."
           } > notes.md
           cat notes.md
 
@@ -98,11 +93,11 @@ jobs:
             --notes-file notes.md \
             --draft
 
-      - name: Attach the archive
+      - name: Attach the binary
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
-        run: gh release upload "$TAG" mwm-aarch64-apple-darwin.tar.gz
+        run: gh release upload "$TAG" mwm-aarch64-apple-darwin
 
       - name: Publish it
         env:
